@@ -25,7 +25,10 @@ class CalendarAPITests(unittest.TestCase):
         app.register_blueprint(create_calendar_blueprint(db_path=self.db))
         self.client = app.test_client()
         self.env = patch.dict(os.environ, {
-            "LEAD_QUALIFIER_API_TOKENS": json.dumps([{"token": "booking-token", "tenant_id": "tenant-a", "scopes": ["booking"]}]),
+            "LEAD_QUALIFIER_API_TOKENS": json.dumps([
+                {"token": "booking-token", "tenant_id": "tenant-a", "scopes": ["booking"]},
+                {"token": "intake-token", "tenant_id": "tenant-a", "scopes": ["intake", "status"]},
+            ]),
             "LEAD_QUALIFIER_API_TOKEN": "intake-token",
             "LEAD_QUALIFIER_TENANT_ID": "tenant-a",
             "LEAD_QUALIFIER_REVIEW_TOKENS": json.dumps([{"token": "review-token", "tenant_id": "tenant-a", "scopes": ["review"]}]),
