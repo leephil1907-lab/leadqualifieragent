@@ -93,6 +93,45 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
         return jsonify(ok=True, job_id=job["id"], status=job["status"], duplicate=not created), (202 if created else 200)
 
 
+
+    @blueprint.post("/api/v1/audits/html-snapshot")
+    def submit_html_audit():
+        """Queue analysis of supplied HTML; this endpoint never fetches a URL."""
+        token, tenant = resolve_bearer_tenant(request.headers.get("Authorization", ""))
+        if not token or not tenant:
+            return jsonify(error="Authentication required."), 401
+        max_audit_body = 1_100_000
+        if request.content_length is not None and request.content_length > max_audit_body:
+            return jsonify(error="Audit snapshot is too large."), 413
+        raw_body = request.get_data(cache=True)
+        if len(raw_body) > max_audit_body:
+            return jsonify(error="Audit snapshot is too large."), 413
+        if not _rate_limit(tenant, token, db_path=db_path):
+            return jsonify(error="Rate limit exceeded. Retry shortly."), 429
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return jsonify(error="Request body must be valid JSON."), 400
+        if not isinstance(body, dict) or body.get("authorized_to_audit") is not True:
+            return jsonify(error="Explicit authorization to audit this HTML snapshot is required."), 400
+        html = body.get("html")
+        if not isinstance(html, str) or not html.strip():
+            return jsonify(error="An HTML snapshot is required."), 400
+        if len(html.encode("utf-8")) > 1_000_000:
+            return jsonify(error="HTML snapshot exceeds the 1 MB limit."), 413
+        key = request.headers.get("Idempotency-Key", "").strip()
+        if not _IDEMPOTENCY_RE.fullmatch(key):
+            return jsonify(error="A valid Idempotency-Key header is required."), 400
+        init_db(db_path)
+        job, created = enqueue(tenant, "audit_html_snapshot",
+                               {"html": html, "authorized_to_audit": True},
+                               key, path=db_path)
+        if not created:
+            existing = get_job(job["id"], tenant, path=db_path)
+            if existing and existing["payload"] != {"html": html, "authorized_to_audit": True}:
+                return jsonify(error="Idempotency-Key was already used with a different payload."), 409
+        return jsonify(ok=True, job_id=job["id"], status=job["status"], duplicate=not created), (202 if created else 200)
+
     @blueprint.post("/api/v1/webhooks/<channel>")
     def signed_channel_webhook(channel: str):
         """Generic signed adapter for trusted channel gateways; no provider secrets in code."""
