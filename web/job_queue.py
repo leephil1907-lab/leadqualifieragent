@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 import time
 import uuid
 from pathlib import Path
@@ -30,8 +31,17 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def connection(path: str | None = None):
+    conn = connect(path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def init_db(path: str | None = None) -> None:
-    with connect(path) as conn:
+    with connection(path) as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS qualifier_jobs (
             id TEXT PRIMARY KEY,
@@ -95,7 +105,7 @@ def enqueue(tenant_id: str, job_type: str, payload: dict[str, Any],
         raise ValueError("max_attempts must be between 1 and 20")
     stamp = time.time() if now is None else float(now)
     job_id = uuid.uuid4().hex
-    with connect(path) as conn:
+    with connection(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute(
