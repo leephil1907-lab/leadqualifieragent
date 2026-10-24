@@ -6,13 +6,13 @@ import time
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from flask import Flask
 
 from web.intake_api import create_intake_blueprint
 from web.review_api import create_review_blueprint
-from web.job_queue import get_job, init_db
+from web.job_queue import enqueue, get_job, init_db
 from web.worker import process_job, run_once
 
 
@@ -115,6 +115,28 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         self.assertEqual(result["qualification"]["scoring_version"], "baseline-v1")
         self.assertTrue(result["review"]["required"])
         self.assertFalse(result["external_actions_allowed"])
+
+
+    @patch("web.worker.requests.post")
+    def test_telegram_alert_is_a_durable_retryable_queue_job(self, post):
+        os.environ["TELEGRAM_BOT_TOKEN"] = "test-bot-token"
+        os.environ["TELEGRAM_ADMIN_CHAT_ID"] = "admin-chat"
+        response = self.post({"name": "Ada", "company": "Example Plumbing", "consent": True},
+                             key="telegram-lead-001")
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(run_once(path=self.db))
+        notification, created = enqueue("tenant-test", "telegram_notification", {"text": "unused"},
+            "telegram-notification:" + response.json["job_id"], path=self.db)
+        self.assertFalse(created)
+        self.assertEqual(notification["status"], "queued")
+        post.return_value = Mock()
+        post.return_value.raise_for_status.return_value = None
+        post.return_value.json.return_value = {"ok": True, "result": {"message_id": 77}}
+        self.assertTrue(run_once(path=self.db))
+        delivered = get_job(notification["id"], "tenant-test", path=self.db)
+        self.assertEqual(delivered["status"], "succeeded")
+        self.assertEqual(delivered["result"]["notification"], "sent")
+        self.assertIn("Example Plumbing", delivered["payload"]["text"])
 
     def test_worker_completes_job_and_review_is_audited(self):
         response = self.post({"name": "Ada", "consent": True})
