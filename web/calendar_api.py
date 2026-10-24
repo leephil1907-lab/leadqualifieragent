@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -79,7 +80,7 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
             data = response.json()
             return jsonify(availability=data.get("data", data)), 200
         except (requests.RequestException, ValueError) as exc:
-            blueprint.logger.warning("Cal.com availability request failed: %s", type(exc).__name__)
+            logging.getLogger(__name__).warning("Cal.com availability request failed: %s", type(exc).__name__)
             return jsonify(error="Availability could not be retrieved."), 502
 
     @blueprint.post("/api/v1/calendar/bookings")
