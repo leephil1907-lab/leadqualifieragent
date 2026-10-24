@@ -20,7 +20,7 @@ from web.service_auth import resolve_bearer_tenant
 def _config():
     key = os.getenv("CAL_COM_API_KEY", "").strip()
     event_type = os.getenv("CAL_COM_EVENT_TYPE_ID", "").strip()
-    version = os.getenv("CAL_COM_API_VERSION", "2024-08-13").strip()
+    version = os.getenv("CAL_COM_API_VERSION", "2026-02-25").strip()
     return key, event_type, version
 
 
