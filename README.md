@@ -46,3 +46,19 @@ Do not deploy this module as a public standalone service without implementing au
 
 ## Qualification principles
 AI may extract and explain supported facts, but a deterministic rules engine owns the score. Uncertain or conflicting cases should be routed to human review. Every material decision and external action should be recorded with enough evidence to explain it later.
+
+
+## Authenticated intake and worker (feature branch)
+
+The optional server-to-server endpoint is `POST /api/v1/intake/leads`. Register it with:
+
+```python
+from web.intake_api import create_intake_blueprint
+app.register_blueprint(create_intake_blueprint())
+```
+
+Configure `LEAD_QUALIFIER_API_TOKEN` and `LEAD_QUALIFIER_TENANT_ID`; without both values the endpoint fails closed with HTTP 503. Send a Bearer token, an `Idempotency-Key` header, JSON lead fields, and explicit `"consent": true`. A new submission returns HTTP 202 and a job ID; a repeated identical key/payload returns the original job, while a changed payload with the same key returns HTTP 409. The configured tenant is server-side, not accepted from the body.
+
+Run the worker on the same host/database with `python -m web.worker`. It processes `qualify_lead` jobs with the existing `baseline-v1` deterministic scorer, retries failures, and writes results/audit events. It does not call Telegram, email, an LLM, enrichment services, or booking APIs. Use a process supervisor in deployment; keep the SQLite database on persistent local storage. Do not use this SQLite queue for multi-instance production workloads.
+
+Run checks with `python -m pytest tests -q`, `python -m compileall -q web tests`, and `pip-audit -r requirements.txt`.
