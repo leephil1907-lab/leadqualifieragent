@@ -235,7 +235,7 @@ def list_events(job_id: str, tenant_id: str, *, path: str | None = None) -> list
     with connection(path) as conn:
         rows = conn.execute(
             """SELECT event_type,detail,created_at FROM qualifier_job_events
-               WHERE job_id=? AND tenant_id=? ORDER BY created_at,id""",
+               WHERE job_id=? AND tenant_id=? ORDER BY created_at,rowid""",
             (job_id, tenant_id),
         ).fetchall()
         return [{**dict(row), "detail": json.loads(row["detail"])} for row in rows]
