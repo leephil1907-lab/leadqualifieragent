@@ -114,10 +114,13 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
             return jsonify(error="Invalid webhook timestamp."), 401
         if abs(int(time.time()) - sent_at) > 300:
             return jsonify(error="Webhook timestamp expired."), 401
+        if request.content_length is not None and request.content_length > _MAX_BODY:
+            return jsonify(error="Request body is too large."), 413
         raw_body = request.get_data(cache=True)
         if len(raw_body) > _MAX_BODY:
             return jsonify(error="Request body is too large."), 413
         matched_tenant = None
+        matched_secret = None
         signed = (timestamp + ".").encode("utf-8") + raw_body
         import hmac
         import hashlib as _hashlib
@@ -127,15 +130,15 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
             secret, tenant_id = entry.get("secret"), entry.get("tenant_id")
             if not isinstance(secret, str) or not secret or not isinstance(tenant_id, str) or not tenant_id:
                 continue
-            expected = _hashlib.sha256()
-            expected.update(hmac.new(secret.encode("utf-8"), signed, _hashlib.sha256).hexdigest().encode("ascii"))
-            expected_signature = expected.hexdigest()
-            # Preferred signature is the raw HMAC hex digest; no secret is ever logged.
+            # Signature format: sha256=<hex HMAC(timestamp + "." + raw_body)>.
             if hmac.compare_digest(signature.removeprefix("sha256="), hmac.new(secret.encode("utf-8"), signed, _hashlib.sha256).hexdigest()):
                 matched_tenant = tenant_id
+                matched_secret = secret
                 break
         if not matched_tenant:
             return jsonify(error="Webhook signature is invalid."), 401
+        if not _rate_limit(matched_tenant, matched_secret or "", db_path=db_path):
+            return jsonify(error="Rate limit exceeded. Retry shortly."), 429
         try:
             body = json.loads(raw_body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
