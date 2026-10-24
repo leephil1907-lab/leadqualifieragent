@@ -1,5 +1,8 @@
+import hashlib
+import hmac
 import json
 import os
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -130,6 +133,31 @@ class AuthenticatedIntakeTests(unittest.TestCase):
             json={"decision": "rejected", "reviewer": "agent-owner", "reason": "Second decision"},
             headers={"Authorization": "Bearer review-secret-token"})
         self.assertEqual(second.status_code, 409)
+
+
+    def test_signed_whatsapp_webhook_requires_fresh_valid_signature_and_consent(self):
+        secret = "webhook-secret-for-tests"
+        os.environ["LEAD_QUALIFIER_WEBHOOK_SECRETS"] = json.dumps([
+            {"channel": "whatsapp", "secret": secret, "tenant_id": "tenant-test"}
+        ])
+        timestamp = str(int(time.time()))
+        raw = json.dumps({"name": "Ada", "email": "ada@example.com", "consent": True},
+                         separators=(",", ":")).encode("utf-8")
+        signed = timestamp.encode("utf-8") + b"." + raw
+        signature = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+        headers = {"X-Webhook-Timestamp": timestamp, "X-Webhook-Signature": "sha256=" + signature,
+                   "Idempotency-Key": "webhook-request-1", "Content-Type": "application/json"}
+        response = self.client.post("/api/v1/webhooks/whatsapp", data=raw, headers=headers)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(get_job(response.json["job_id"], "tenant-test", path=self.db)["payload"]["lead"]["source"], "whatsapp")
+        bad = dict(headers)
+        bad["X-Webhook-Signature"] = "sha256=bad"
+        self.assertEqual(self.client.post("/api/v1/webhooks/whatsapp", data=raw, headers=bad).status_code, 401)
+
+    def test_intake_token_cannot_access_human_review_routes(self):
+        response = self.client.get("/api/v1/reviews",
+            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        self.assertEqual(response.status_code, 401)
 
     def test_rate_limit_enforced(self):
         os.environ["LEAD_QUALIFIER_RATE_LIMIT_PER_MINUTE"] = "1"
