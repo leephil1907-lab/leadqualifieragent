@@ -1,4 +1,4 @@
-"""Shared bearer-token authentication and tenant resolution for service APIs."""
+"""Shared scoped bearer-token authentication and tenant resolution."""
 from __future__ import annotations
 
 import hmac
@@ -7,18 +7,24 @@ import os
 from typing import Any
 
 
-def resolve_bearer_tenant(authorization: str) -> tuple[str | None, str | None]:
-    """Resolve a configured API token to its tenant without trusting request fields.
+def resolve_bearer_tenant(authorization: str, *, purpose: str = "intake") -> tuple[str | None, str | None]:
+    """Resolve a token to a tenant; request bodies never determine tenant identity.
 
-    Preferred configuration: LEAD_QUALIFIER_API_TOKENS='[{"token":"...","tenant_id":"..."}]'.
-    Backward-compatible single-tenant configuration uses LEAD_QUALIFIER_API_TOKEN and
-    LEAD_QUALIFIER_TENANT_ID. Empty/malformed configuration fails closed.
+    Configure JSON token maps as arrays of {token, tenant_id}; API tokens may optionally
+    include scopes, e.g. ["intake", "status"]. Review endpoints use the separate
+    LEAD_QUALIFIER_REVIEW_TOKENS map, never the intake token by default.
     """
     scheme, _, supplied = (authorization or "").partition(" ")
     if scheme.lower() != "bearer" or not supplied:
         return None, None
 
-    raw = os.getenv("LEAD_QUALIFIER_API_TOKENS", "").strip()
+    if purpose == "review":
+        raw = os.getenv("LEAD_QUALIFIER_REVIEW_TOKENS", "").strip()
+        if not raw:
+            return None, None
+    else:
+        raw = os.getenv("LEAD_QUALIFIER_API_TOKENS", "").strip()
+
     if raw:
         try:
             entries: Any = json.loads(raw)
@@ -31,11 +37,19 @@ def resolve_bearer_tenant(authorization: str) -> tuple[str | None, str | None]:
                 continue
             token = entry.get("token")
             tenant = entry.get("tenant_id")
+            scopes = entry.get("scopes", ["intake", "status"])
+            if purpose == "review" and purpose not in scopes:
+                continue
+            if purpose != "review" and purpose not in scopes:
+                continue
             if isinstance(token, str) and token and isinstance(tenant, str) and tenant.strip():
                 if hmac.compare_digest(supplied, token):
                     return token, tenant.strip()
         return None, None
 
+    # Backward-compatible, single-tenant intake/status token only.
+    if purpose == "review":
+        return None, None
     token = os.getenv("LEAD_QUALIFIER_API_TOKEN", "").strip()
     tenant = os.getenv("LEAD_QUALIFIER_TENANT_ID", "").strip()
     if token and tenant and hmac.compare_digest(supplied, token):
