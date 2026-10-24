@@ -11,7 +11,7 @@ def create_review_blueprint(*, db_path: str | None = None) -> Blueprint:
     blueprint = Blueprint("lead_qualifier_review", __name__)
 
     def tenant():
-        _, tenant_id = resolve_bearer_tenant(request.headers.get("Authorization", ""))
+        _, tenant_id = resolve_bearer_tenant(request.headers.get("Authorization", ""), purpose="review")
         return tenant_id
 
     @blueprint.get("/api/v1/reviews")
