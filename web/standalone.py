@@ -10,6 +10,7 @@ from flask import Flask, jsonify
 from web.intake_api import create_intake_blueprint
 from web.analytics_api import create_analytics_blueprint
 from web.calendar_api import create_calendar_blueprint
+from web.outbound_api import create_outbound_blueprint
 from web.review_api import create_review_blueprint
 from web.job_queue import init_db
 
@@ -23,6 +24,7 @@ def create_app() -> Flask:
     app.register_blueprint(create_review_blueprint(db_path=db_path))
     app.register_blueprint(create_analytics_blueprint(db_path=db_path))
     app.register_blueprint(create_calendar_blueprint(db_path=db_path))
+    app.register_blueprint(create_outbound_blueprint(db_path=db_path))
 
     @app.get("/healthz")
     def healthz():
