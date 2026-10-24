@@ -58,7 +58,13 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
         key = request.headers.get("Idempotency-Key", "").strip()
         if not _IDEMPOTENCY_RE.fullmatch(key):
             return jsonify(error="A valid Idempotency-Key header is required."), 400
-        body = request.get_json(silent=True)
+        raw_body = request.get_data(cache=True)
+        if len(raw_body) > _MAX_BODY:
+            return jsonify(error="Request body is too large."), 413
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return jsonify(error="Request body must be valid JSON."), 400
         if not isinstance(body, dict):
             return jsonify(error="Request body must be a JSON object."), 400
         if body.get("consent") is not True:
