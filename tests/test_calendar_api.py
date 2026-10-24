@@ -72,13 +72,21 @@ class CalendarAPITests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
 
+
+    def test_booking_requires_explicit_booking_consent(self):
+        job_id = self._approved_job()
+        response = self.client.post("/api/v1/calendar/bookings", json={
+            "job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos"
+        }, headers={"Authorization": "Bearer booking-token", "Idempotency-Key": "booking-no-consent-001"})
+        self.assertEqual(response.status_code, 400)
+
     @patch("web.calendar_api.requests.post")
     def test_booking_timeout_is_marked_uncertain_and_not_retried(self, post):
         job_id = self._approved_job()
         import requests
         post.side_effect = requests.Timeout("response timed out")
         headers = {"Authorization": "Bearer booking-token", "Idempotency-Key": "booking-timeout-001"}
-        body = {"job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos"}
+        body = {"job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos", "booking_consent": True, "booking_consent_version": "v1", "booking_consent_source": "website_chat"}
         first = self.client.post("/api/v1/calendar/bookings", json=body, headers=headers)
         self.assertEqual(first.status_code, 502)
         self.assertEqual(first.json["status"], "uncertain")
