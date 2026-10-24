@@ -208,6 +208,15 @@ def enqueue(tenant_id: str, job_type: str, payload: dict[str, Any],
                     raise LeadIdentityConflict("Email and website match different existing leads; manual review is required.")
                 if matches:
                     identity_type, existing = matches[0]
+                    for new_type, new_hash in identities:
+                        mapped_identity = conn.execute(
+                            "SELECT job_id FROM qualifier_lead_identities WHERE tenant_id=? AND identity_type=? AND identity_hash=?",
+                            (tenant_id, new_type, new_hash),
+                        ).fetchone()
+                        if mapped_identity and mapped_identity["job_id"] != existing["id"]:
+                            raise LeadIdentityConflict("Email and website match different existing leads; manual review is required.")
+                        conn.execute("INSERT OR IGNORE INTO qualifier_lead_identities VALUES(?,?,?,?,?)",
+                                     (tenant_id, new_type, new_hash, existing["id"], stamp))
                     conn.execute("INSERT INTO qualifier_request_keys VALUES(?,?,?,?,?)",
                                  (tenant_id, key, existing["id"], payload_hash, stamp))
                     _event(conn, existing["id"], tenant_id, "duplicate_submission",
