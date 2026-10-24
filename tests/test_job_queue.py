@@ -66,6 +66,8 @@ class DurableJobQueueTests(unittest.TestCase):
         counts = recover_stale(path=self.db, now=20, lease_seconds=10)
         self.assertEqual(counts, {"requeued": 1, "dead": 0})
         self.assertEqual(get_job(retryable["id"], "tenant-a", path=self.db)["status"], "queued")
+        self.assertEqual(claim_next(path=self.db, now=20)["id"], retryable["id"])
+        self.assertTrue(complete(retryable["id"], "tenant-a", {}, path=self.db, now=20))
 
         exhausted, _ = enqueue("tenant-a", "qualify", {}, "exhausted", path=self.db,
                                max_attempts=1, now=21)
