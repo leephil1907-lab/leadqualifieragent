@@ -61,11 +61,13 @@ class CalendarAPITests(unittest.TestCase):
         post.return_value.raise_for_status.return_value = None
         post.return_value.json.return_value = {"data": {"uid": "booking-123", "status": "accepted", "start": "2027-01-01T10:00:00Z"}}
         response = self.client.post("/api/v1/calendar/bookings", json={
-            "job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos"
+            "job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos",
+            "booking_consent": True, "booking_consent_version": "v1", "booking_consent_source": "website_chat"
         }, headers={"Authorization": "Bearer booking-token", "Idempotency-Key": "booking-request-001"})
         self.assertEqual(response.status_code, 201)
         again = self.client.post("/api/v1/calendar/bookings", json={
-            "job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos"
+            "job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos",
+            "booking_consent": True, "booking_consent_version": "v1", "booking_consent_source": "website_chat"
         }, headers={"Authorization": "Bearer booking-token", "Idempotency-Key": "booking-request-001"})
         self.assertEqual(again.status_code, 200)
         self.assertTrue(again.json["duplicate"])
@@ -100,7 +102,8 @@ class CalendarAPITests(unittest.TestCase):
         self.assertEqual(r.status_code, 202)
         self.assertTrue(run_once(path=self.db))
         response = self.client.post("/api/v1/calendar/bookings", json={
-            "job_id": r.json["job_id"], "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos"
+            "job_id": r.json["job_id"], "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos",
+            "booking_consent": True, "booking_consent_version": "v1", "booking_consent_source": "website_chat"
         }, headers={"Authorization": "Bearer booking-token", "Idempotency-Key": "booking-request-002"})
         self.assertEqual(response.status_code, 403)
 
