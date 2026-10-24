@@ -68,6 +68,16 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         self.assertEqual(job["payload"]["lead"]["email"], "ada@example.com")
         self.assertEqual(job["payload"]["lead"]["website"], "https://example.com")
 
+
+    def test_distinct_idempotency_keys_deduplicate_same_email(self):
+        first = self.post({"name": "Ada", "email": "ada@example.com", "consent": True}, key="lead-submit-001")
+        second = self.post({"name": "Ada Lovelace", "email": "ADA@example.com", "consent": True}, key="lead-submit-002")
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.json["duplicate"])
+        self.assertEqual(second.json["duplicate_reason"], "matching_email")
+        self.assertEqual(first.json["job_id"], second.json["job_id"])
+
     def test_reusing_idempotency_key_with_different_payload_is_conflict(self):
         self.assertEqual(self.post({"name": "Ada", "consent": True}).status_code, 202)
         response = self.post({"name": "Grace", "consent": True})
