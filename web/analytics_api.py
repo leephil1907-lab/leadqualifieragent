@@ -88,20 +88,26 @@ def create_analytics_blueprint(*, db_path: str | None = None) -> Blueprint:
             return jsonify(error="revenue must be a non-negative number within the supported range."), 400
         ensure_outcomes()
         with connection(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             job = conn.execute("SELECT id FROM qualifier_jobs WHERE id=? AND tenant_id=? AND status='succeeded'",
                                (job_id, tenant_id)).fetchone()
             if not job:
+                conn.rollback()
                 return jsonify(error="Completed job not found."), 404
             existing = conn.execute("SELECT * FROM qualifier_outcomes WHERE tenant_id=? AND idempotency_key=?",
                                     (tenant_id, key)).fetchone()
             if existing:
-                if existing["job_id"] != job_id or existing["outcome"] != outcome:
-                    return jsonify(error="Idempotency-Key was already used for a different outcome."), 409
+                same_payload = (existing["job_id"] == job_id and existing["outcome"] == outcome
+                                and existing["revenue"] == revenue and existing["reason"] == reason)
+                conn.commit()
+                if not same_payload:
+                    return jsonify(error="Idempotency-Key was already used for a different outcome payload."), 409
                 return jsonify(ok=True, outcome=existing["outcome"], duplicate=True), 200
             conn.execute("""INSERT INTO qualifier_outcomes
                 (id,tenant_id,job_id,idempotency_key,outcome,revenue,reason,created_at)
                 VALUES(?,?,?,?,?,?,?,strftime('%s','now'))""",
                 (uuid.uuid4().hex, tenant_id, job_id, key, outcome, revenue, reason))
+            conn.commit()
         return jsonify(ok=True, job_id=job_id, outcome=outcome, duplicate=False), 201
 
     return blueprint
