@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request
 
 from web.service_auth import resolve_bearer_tenant
 from web.intake_validation import IntakeValidationError, normalize_lead
-from web.job_queue import connection, enqueue, get_job, init_db, list_events
+from web.job_queue import IdempotencyConflict, LeadIdentityConflict, connection, enqueue, get_job, init_db, list_events
 
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 _MAX_BODY = 32 * 1024
@@ -84,9 +84,15 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
         payload = {"lead": lead, "consent": consent}
         try:
             job, created = enqueue(tenant, "qualify_lead", payload, key, path=db_path)
+        except (IdempotencyConflict, LeadIdentityConflict) as exc:
+            return jsonify(error=str(exc)), 409
         except (ValueError, TypeError):
             return jsonify(error="Invalid intake request."), 400
         if not created:
+            identity_duplicate = job.pop("_duplicate_identity", None)
+            if identity_duplicate:
+                return jsonify(ok=True, job_id=job["id"], status=job["status"], duplicate=True,
+                               duplicate_reason="matching_" + identity_duplicate), 200
             existing = get_job(job["id"], tenant, path=db_path)
             if existing and existing["payload"] != payload:
                 return jsonify(error="Idempotency-Key was already used with a different payload."), 409
@@ -198,8 +204,15 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
             "source": channel, "recorded_at": str(body.get("consent_recorded_at", ""))[:80],
         }
         payload = {"lead": lead, "consent": consent}
-        job, created = enqueue(matched_tenant, "qualify_lead", payload, key, path=db_path)
+        try:
+            job, created = enqueue(matched_tenant, "qualify_lead", payload, key, path=db_path)
+        except (IdempotencyConflict, LeadIdentityConflict) as exc:
+            return jsonify(error=str(exc)), 409
         if not created:
+            identity_duplicate = job.pop("_duplicate_identity", None)
+            if identity_duplicate:
+                return jsonify(ok=True, job_id=job["id"], status=job["status"], channel=channel,
+                               duplicate=True, duplicate_reason="matching_" + identity_duplicate), 200
             existing = get_job(job["id"], matched_tenant, path=db_path)
             if existing and existing["payload"] != payload:
                 return jsonify(error="Idempotency-Key was already used with a different payload."), 409
