@@ -92,6 +92,78 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
                 return jsonify(error="Idempotency-Key was already used with a different payload."), 409
         return jsonify(ok=True, job_id=job["id"], status=job["status"], duplicate=not created), (202 if created else 200)
 
+
+    @blueprint.post("/api/v1/webhooks/<channel>")
+    def signed_channel_webhook(channel: str):
+        """Generic signed adapter for trusted channel gateways; no provider secrets in code."""
+        allowed = {"website_form", "email", "whatsapp", "telegram", "phone", "crm", "calcom"}
+        if channel not in allowed:
+            return jsonify(error="Unsupported intake channel."), 404
+        raw_secrets = os.getenv("LEAD_QUALIFIER_WEBHOOK_SECRETS", "").strip()
+        try:
+            entries = json.loads(raw_secrets) if raw_secrets else []
+        except ValueError:
+            entries = []
+        if not isinstance(entries, list):
+            entries = []
+        timestamp = request.headers.get("X-Webhook-Timestamp", "")
+        signature = request.headers.get("X-Webhook-Signature", "")
+        try:
+            sent_at = int(timestamp)
+        except (TypeError, ValueError):
+            return jsonify(error="Invalid webhook timestamp."), 401
+        if abs(int(time.time()) - sent_at) > 300:
+            return jsonify(error="Webhook timestamp expired."), 401
+        raw_body = request.get_data(cache=True)
+        if len(raw_body) > _MAX_BODY:
+            return jsonify(error="Request body is too large."), 413
+        matched_tenant = None
+        signed = (timestamp + ".").encode("utf-8") + raw_body
+        import hmac
+        import hashlib as _hashlib
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("channel") != channel:
+                continue
+            secret, tenant_id = entry.get("secret"), entry.get("tenant_id")
+            if not isinstance(secret, str) or not secret or not isinstance(tenant_id, str) or not tenant_id:
+                continue
+            expected = _hashlib.sha256()
+            expected.update(hmac.new(secret.encode("utf-8"), signed, _hashlib.sha256).hexdigest().encode("ascii"))
+            expected_signature = expected.hexdigest()
+            # Preferred signature is the raw HMAC hex digest; no secret is ever logged.
+            if hmac.compare_digest(signature.removeprefix("sha256="), hmac.new(secret.encode("utf-8"), signed, _hashlib.sha256).hexdigest()):
+                matched_tenant = tenant_id
+                break
+        if not matched_tenant:
+            return jsonify(error="Webhook signature is invalid."), 401
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return jsonify(error="Webhook body must be valid JSON."), 400
+        if not isinstance(body, dict) or body.get("consent") is not True:
+            return jsonify(error="A JSON object and explicit consent are required."), 400
+        try:
+            lead = normalize_lead({**body, "source": channel})
+        except IntakeValidationError as exc:
+            return jsonify(error=str(exc)), 400
+        key = request.headers.get("Idempotency-Key", "").strip()
+        if not _IDEMPOTENCY_RE.fullmatch(key):
+            return jsonify(error="A valid Idempotency-Key header is required."), 400
+        init_db(db_path)
+        consent = {
+            "granted": True, "purpose": str(body.get("consent_purpose", "lead_qualification"))[:100],
+            "wording_version": str(body.get("consent_version", ""))[:80],
+            "source": channel, "recorded_at": str(body.get("consent_recorded_at", ""))[:80],
+        }
+        payload = {"lead": lead, "consent": consent}
+        job, created = enqueue(matched_tenant, "qualify_lead", payload, key, path=db_path)
+        if not created:
+            existing = get_job(job["id"], matched_tenant, path=db_path)
+            if existing and existing["payload"] != payload:
+                return jsonify(error="Idempotency-Key was already used with a different payload."), 409
+        return jsonify(ok=True, job_id=job["id"], status=job["status"], channel=channel,
+                       duplicate=not created), (202 if created else 200)
+
     @blueprint.get("/api/v1/intake/jobs/<job_id>")
     def job_status(job_id: str):
         _, tenant = resolve_bearer_tenant(request.headers.get("Authorization", ""))
