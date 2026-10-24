@@ -1,8 +1,14 @@
 # Reachmark Lead Qualifier Agent
 
+The standalone app now includes a public marketing landing page at `/` with a client-side illustrative lead-triage demo. Set `SALES_EMAIL` to an inbox you control before publishing; the demo does not submit or store visitor inputs. The page markets a scoped managed pilot and does not claim unverified provider integrations are live.
+
 A reusable lead-qualification foundation extracted from Reachmark Digital. It provides transparent, deterministic fit and intent scoring, lead tiers, next-question selection, SQLite-backed qualification history, conversation history, and optional Telegram notifications.
 
 ## Current scope
+
+- Side-effect-free intake normalization with field limits, email checks, and safe HTTP/HTTPS URL normalization.
+- Durable SQLite job-queue primitive with tenant-scoped idempotency, atomic claims, exponential retries, dead-letter state, and an append-only event trail.
+- Tests for queue lifecycle, retry exhaustion, duplicate submissions, and tenant isolation.
 - Deterministic fit score, intent score, weighted total, and A/B/C/D tiers.
 - Reasons and missing-field evidence for each score.
 - A single next qualification question.
@@ -27,10 +33,100 @@ Create a virtual environment, run pip install -r requirements.txt, then run pyth
 ## Environment
 Telegram alerts are optional and require TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_CHAT_ID. Do not commit secrets to this repository.
 
-## Important limitations before production
-This is a foundation, not yet the full Version 3 specification. Public anonymous capture, rate limiting, consent/policy enforcement, a durable background queue and dead-letter handling, AI fact extraction with evidence/confidence validation, website auditing, provider-based enrichment, Cal.com booking, human-review actions, and multi-channel ingestion remain future work. The current message endpoint uses simple deterministic inference; it is not an AI extractor. The current score is a baseline and should be evaluated against a labeled dataset before production decisions depend on it.
+## Phase 1 reliability work
 
-Do not deploy this module as a public standalone service without implementing authentication, tenant isolation, CSRF/webhook protections as appropriate, rate limiting, and an operational job queue.
+The `web.job_queue` module is a storage primitive for a separate worker to use. It supports `queued`, `processing`, `succeeded`, and `dead` states; atomic claiming; bounded retries; tenant-scoped idempotency; and audit events. It does not start a worker process or automatically execute jobs. The current implementation is SQLite-backed for development and modest single-host workloads.
+
+The `web.intake_validation` module bounds recognized fields, discards unknown keys, normalizes email and website values, and rejects malformed input before persistence. It does not fetch websites or guarantee protection against SSRF in any future URL-fetching component.
+
+CI runs unit tests, Python compilation, and a dependency vulnerability audit. A clean dependency audit only covers known published package vulnerabilities and does not replace application security review.
+
+## Remaining integration gates
+This repository remains a Flask integration module rather than a standalone SaaS application. The authenticated queue, worker, tenant-scoped review queue, and signed channel webhook adapter are implemented on the feature branch. Live provider enrichment, website crawling/auditing, an LLM extractor, Cal.com booking, production dashboard UI, Telegram delivery from the worker, and provider-specific email/WhatsApp/phone adapters are not represented as complete: they require approved provider choices, credentials, host-app wiring, and additional validation. No provider calls are fabricated.
+
+The deterministic `baseline-v1` scoring engine is unchanged. Evaluate it against a representative, labeled dataset before using it for consequential routing. Do not expose the service publicly until the deployment checklist in SECURITY.md is satisfied.
 
 ## Qualification principles
 AI may extract and explain supported facts, but a deterministic rules engine owns the score. Uncertain or conflicting cases should be routed to human review. Every material decision and external action should be recorded with enough evidence to explain it later.
+
+
+## Authenticated intake and worker (feature branch)
+
+The optional server-to-server endpoint is `POST /api/v1/intake/leads`. Register it with:
+
+```python
+from web.intake_api import create_intake_blueprint
+app.register_blueprint(create_intake_blueprint())
+```
+
+Configure `LEAD_QUALIFIER_API_TOKEN` and `LEAD_QUALIFIER_TENANT_ID`; without both values the endpoint fails closed with HTTP 503. Send a Bearer token, an `Idempotency-Key` header, JSON lead fields, and explicit `"consent": true`. A new submission returns HTTP 202 and a job ID; a repeated identical key/payload returns the original job, a repeat lead matching an existing normalized email/website returns the existing job, and a changed payload with the same key returns HTTP 409. The configured tenant is server-side, not accepted from the body.
+
+Run the worker on the same host/database with `python -m web.worker`. It processes `qualify_lead` jobs with the existing `baseline-v1` deterministic scorer, retries failures, and writes results/audit events. It does not call Telegram, email, an LLM, enrichment services, or booking APIs. Use a process supervisor in deployment; keep the SQLite database on persistent local storage. Do not use this SQLite queue for multi-instance production workloads.
+
+Run checks with `python -m pytest tests -q`, `python -m compileall -q web tests`, and `pip-audit -r requirements.txt`.
+
+
+## Authenticated multi-tenant intake and review
+
+The intake blueprint exposes:
+- `POST /api/v1/intake/leads`: bearer-authenticated lead submission, explicit consent, normalized fields, bounded JSON body, per-token/tenant rate limiting, idempotency, and a queued job ID.
+- `GET /api/v1/intake/jobs/<job_id>`: tenant-scoped job status and lifecycle events, without returning the raw intake payload.
+- `POST /api/v1/webhooks/<channel>`: HMAC-SHA256 signed webhooks for `website_form`, `email`, `whatsapp`, `telegram`, `phone`, `crm`, and `calcom`. Sign `timestamp + "." + raw_request_body`, send `X-Webhook-Timestamp`, `X-Webhook-Signature: sha256=<hex>`, and `Idempotency-Key`. Timestamps older than five minutes are rejected. These are generic adapters for trusted gateways, not turnkey integrations with each vendor's unique webhook format.
+- `GET /api/v1/reviews` and `POST /api/v1/reviews/<job_id>`: tenant-scoped review queue and one-time approve/reject decisions with required reasons and audit events. Recording approval does not execute an external action.
+
+Register both blueprints with the host Flask app:
+
+```python
+from web.intake_api import create_intake_blueprint
+from web.review_api import create_review_blueprint
+
+app.register_blueprint(create_intake_blueprint())
+app.register_blueprint(create_review_blueprint())
+```
+
+For one tenant, configure `LEAD_QUALIFIER_API_TOKEN` and `LEAD_QUALIFIER_TENANT_ID`. For multiple tenants, configure `LEAD_QUALIFIER_API_TOKENS` as a JSON array of objects with `token`, `tenant_id`, and optional `scopes`. Keep intake tokens scoped to `intake` and `status`; review uses a separate `LEAD_QUALIFIER_REVIEW_TOKENS` JSON array with `token`, `tenant_id`, and `scopes: ["review"]`. Use long random secrets and keep them out of source control.
+
+Configure signed webhook secrets with `LEAD_QUALIFIER_WEBHOOK_SECRETS`, a JSON array of `{"channel":"whatsapp","secret":"...","tenant_id":"..."}` entries. Store all secrets in deployment secret settings, not in Git.
+
+Run the worker with `python -m web.worker` on the same host and persistent SQLite file. Every processed qualification result is marked for human review, and external actions remain disabled by default. SQLite is not suitable for multi-instance production use; migrate to a shared transactional queue/database before horizontal scaling.
+
+
+## Evidence and action safety
+
+- `web.evidence.validate_extractions` validates proposed extracted fields against exact source-text evidence, confidence thresholds, and conflicts. It is a validator for an extractor's output, not an LLM itself.
+- `web.policy.evaluate_action_policy` fails closed unless explicit consent, a recorded human approval, an allowlisted action, and a valid idempotency key are present. It only evaluates policy; it never performs the action.
+- `web.evaluation.evaluate_labeled_cases` measures the unchanged baseline scorer against supplied human-labeled examples. No production accuracy claim is made without a representative labeled dataset.
+
+These components establish safety contracts. A real model provider, public website auditor, provider-specific enrichment, booking, and outbound messaging must be separately implemented, configured, and tested before they can be described as live integrations.
+
+
+## Optional evidence-grounded LLM extraction
+
+Set `OPENAI_API_KEY` and optionally `LEAD_QUALIFIER_EXTRACTION_MODEL` to enable `web.llm_extractor.extract_lead_facts(text)`. It calls the OpenAI API only when invoked and configured, requests structured output, then independently validates that each cited evidence string appears verbatim in the source and meets the confidence threshold. Unsupported claims are rejected and conflicts trigger human review. This adapter never computes or changes qualification scores. It is not automatically invoked by the worker; host-app orchestration must decide when to call it and must account for API cost, privacy, and retention.
+
+
+## Standalone service
+
+The repository now includes a WSGI application factory in `web.standalone:create_app()`, with `/healthz` and `/readyz` probes. The included `Procfile` defines both `web` and `worker` process commands. Configure `LEAD_QUALIFIER_DB` to a persistent database file shared by the web and worker processes when running on one host.
+
+Before deploying separate web and worker instances or scaling horizontally, migrate the queue to PostgreSQL or a managed queue. Separate ephemeral service filesystems cannot share the SQLite database. Production deployment has not been performed by this change.
+
+
+## Telegram worker alerts
+
+When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_CHAT_ID` are configured, the worker enqueues an idempotent `telegram_notification` job after completing a lead qualification. Notifications are processed by the same durable queue and use the queue's retry/dead-letter behavior. Alerts contain the business name, score, tier, pending-review status, and job ID; they omit the lead's email and phone. Delivery is at-least-once across ambiguous network failures, so duplicate admin alerts are possible if Telegram accepts a message but the response is lost.
+
+
+## Pipeline analytics and outcomes
+
+The standalone app also registers `GET /api/v1/analytics/summary` for tenant-scoped job states, tier counts, review states, average qualification score, and recorded outcomes. Record a conversion or loss through `POST /api/v1/outcomes` with a completed `job_id`, an outcome (`meeting_booked`, `converted`, `lost`, `not_interested`, or `unqualified`), an `Idempotency-Key`, and optional revenue/reason. Outcome recording is transactionally idempotent and scoped to the authenticated tenant. This creates a feedback dataset; it does not automatically retrain or alter scoring.
+
+
+## Cal.com scheduling (optional)
+
+The standalone app registers `GET /api/v1/calendar/availability` and `POST /api/v1/calendar/bookings`. Configure `CAL_COM_API_KEY`, `CAL_COM_EVENT_TYPE_ID`, and optionally `CAL_COM_API_VERSION`. Only tokens with an explicit `booking` scope in `LEAD_QUALIFIER_API_TOKENS` can call these routes. Booking requires a completed job, the original lead-processing consent, a separate explicit `booking_consent: true` decision with `booking_consent_version` and `booking_consent_source`, and an approved human-review decision. The booking consent is timestamped and stored separately for audit. The API records an idempotent booking attempt before calling Cal.com; duplicate requests do not create another booking. If the provider times out, the result is marked `uncertain` and automatic retry is blocked because the provider may have created the booking. Reconcile uncertain attempts in Cal.com before taking further action. A live booking test still requires real Cal.com credentials and an event type; CI uses mocked HTTP responses.
+
+
+## Configuration template
+
+Start from `.env.example` for the supported environment variables. Replace every `CHANGE_ME` value with a high-entropy secret and configure secrets through the deployment platform's secret manager in production. Never commit a populated `.env` file.
