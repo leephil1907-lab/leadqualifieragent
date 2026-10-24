@@ -273,3 +273,66 @@ def list_events(job_id: str, tenant_id: str, *, path: str | None = None) -> list
             (job_id, tenant_id),
         ).fetchall()
         return [{**dict(row), "detail": json.loads(row["detail"])} for row in rows]
+
+
+def list_pending_reviews(tenant_id: str, *, path: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    """List completed qualification jobs awaiting a human decision for one tenant."""
+    safe_limit = max(1, min(int(limit), 200))
+    with connection(path) as conn:
+        rows = conn.execute(
+            """SELECT id,job_type,result,created_at,updated_at FROM qualifier_jobs
+               WHERE tenant_id=? AND status='succeeded' ORDER BY updated_at DESC LIMIT ?""",
+            (tenant_id, safe_limit * 5),
+        ).fetchall()
+    pending = []
+    for row in rows:
+        result = json.loads(row["result"] or "{}")
+        review = result.get("review") if isinstance(result, dict) else None
+        if isinstance(review, dict) and review.get("required") and review.get("status") == "pending":
+            pending.append({
+                "job_id": row["id"], "job_type": row["job_type"],
+                "created_at": row["created_at"], "updated_at": row["updated_at"],
+                "qualification": result.get("qualification", {}),
+                "lead": result.get("lead", {}),
+            })
+            if len(pending) >= safe_limit:
+                break
+    return pending
+
+
+def decide_review(job_id: str, tenant_id: str, decision: str, reviewer: str,
+                  reason: str, *, path: str | None = None, now: float | None = None) -> dict[str, Any]:
+    """Record a tenant-scoped human decision; never trigger an external action."""
+    decision = str(decision or "").strip().lower()
+    reviewer = str(reviewer or "").strip()[:200]
+    reason = str(reason or "").strip()[:1000]
+    if decision not in {"approved", "rejected"}:
+        raise ValueError("decision must be approved or rejected")
+    if not reviewer or not reason:
+        raise ValueError("reviewer and reason are required")
+    stamp = time.time() if now is None else float(now)
+    with connection(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM qualifier_jobs WHERE id=? AND tenant_id=? AND status='succeeded'",
+            (job_id, tenant_id),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            raise LookupError("Job not found")
+        result = json.loads(row["result"] or "{}")
+        review = result.get("review") if isinstance(result, dict) else None
+        if not isinstance(review, dict) or not review.get("required"):
+            conn.rollback()
+            raise ValueError("This job does not require human review")
+        if review.get("status") != "pending":
+            conn.rollback()
+            raise ValueError("A review decision has already been recorded")
+        review.update({"status": decision, "reviewer": reviewer, "reason": reason, "decided_at": stamp})
+        conn.execute("UPDATE qualifier_jobs SET result=?,updated_at=? WHERE id=? AND tenant_id=?",
+                     (json.dumps(result, ensure_ascii=False, sort_keys=True), stamp, job_id, tenant_id))
+        _event(conn, job_id, tenant_id, "review_" + decision,
+               {"reviewer": reviewer, "reason": reason}, stamp)
+        conn.commit()
+        return {"job_id": job_id, "decision": decision, "reviewer": reviewer,
+                "reason": reason, "decided_at": stamp, "external_actions_allowed": False}
