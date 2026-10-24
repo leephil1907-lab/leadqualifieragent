@@ -1,4 +1,4 @@
-"""Runnable worker for durable lead-qualification jobs.
+"""Runnable worker for durable lead-qualification and audit jobs.
 
 Run with: python -m web.worker
 SQLite is intended for one host and modest throughput; migrate to PostgreSQL or a
@@ -12,7 +12,9 @@ import signal
 import time
 from typing import Any
 
-from web.job_queue import claim_next, complete, fail, init_db, recover_stale
+import requests
+
+from web.job_queue import claim_next, complete, enqueue, fail, init_db, recover_stale
 from web.lead_qualifier import _score
 from web.website_audit import audit_html_snapshot
 
@@ -21,7 +23,7 @@ _STOP = False
 
 
 def process_job(job: dict[str, Any]) -> dict[str, Any]:
-    """Process a qualification job without external side effects."""
+    """Process jobs; outbound client communication is not part of qualification."""
     payload = job.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("Job payload must be an object")
@@ -35,6 +37,25 @@ def process_job(job: dict[str, Any]) -> dict[str, Any]:
                        "reason": "Review audit findings before making recommendations or changes."},
             "external_actions_allowed": False,
         }
+    if job.get("job_type") == "telegram_notification":
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
+        if not token or not chat_id:
+            raise ValueError("Telegram notification is not configured")
+        message = payload.get("text")
+        if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+            raise ValueError("Telegram notification text is invalid")
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
+            timeout=(3, 10),
+        )
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict) or body.get("ok") is not True:
+            raise RuntimeError("Telegram rejected the notification")
+        return {"notification": "sent", "provider": "telegram", "message_id": body.get("result", {}).get("message_id")}
+
     if job.get("job_type") != "qualify_lead":
         raise ValueError("Unsupported job type")
     lead = payload.get("lead")
@@ -54,6 +75,24 @@ def process_job(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _queue_telegram_alert(job: dict[str, Any], result: dict[str, Any], *, path: str | None) -> None:
+    if job.get("job_type") != "qualify_lead":
+        return
+    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or not os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip():
+        return
+    score = result.get("qualification", {})
+    lead = result.get("lead", {})
+    text = (
+        "New lead qualified\n"
+        f"Business: {str(lead.get('company') or lead.get('name') or 'Unknown')[:160]}\n"
+        f"Score: {score.get('total_score', 0)}/100 · Tier {score.get('tier', 'D')}\n"
+        f"Fit: {score.get('fit_score', 0)} · Intent: {score.get('intent_score', 0)}\n"
+        f"Review: pending\nJob: {job.get('id')}"
+    )
+    enqueue(job["tenant_id"], "telegram_notification", {"text": text},
+            "telegram-notification:" + job["id"], path=path)
+
+
 def run_once(*, path: str | None = None) -> bool:
     job = claim_next(path=path)
     if job is None:
@@ -61,7 +100,14 @@ def run_once(*, path: str | None = None) -> bool:
     tenant = job["tenant_id"]
     try:
         result = process_job(job)
-        if not complete(job["id"], tenant, result, path=path):
+        if complete(job["id"], tenant, result, path=path):
+            try:
+                _queue_telegram_alert(job, result, path=path)
+            except Exception:
+                # The qualification result is durable; notification enqueue errors are
+                # logged separately and must not turn a successful qualification into failure.
+                LOG.exception("Could not enqueue Telegram alert for job %s", job.get("id"))
+        else:
             LOG.error("Could not complete job %s: job is no longer processing", job["id"])
     except Exception as exc:
         LOG.exception("Job %s failed", job.get("id"))
