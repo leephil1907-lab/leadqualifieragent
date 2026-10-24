@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from flask import Blueprint, jsonify, request
 
@@ -10,6 +11,7 @@ from web.job_queue import connection
 
 
 _ALLOWED_OUTCOMES = {"meeting_booked", "converted", "lost", "not_interested", "unqualified"}
+_IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 
 
 def create_analytics_blueprint(*, db_path: str | None = None) -> Blueprint:
@@ -78,8 +80,10 @@ def create_analytics_blueprint(*, db_path: str | None = None) -> Blueprint:
         key = request.headers.get("Idempotency-Key", "").strip()
         reason = str(body.get("reason", "")).strip()[:500]
         revenue_raw = body.get("revenue")
-        if not job_id or outcome not in _ALLOWED_OUTCOMES or not (8 <= len(key) <= 200):
-            return jsonify(error="job_id, a supported outcome, and Idempotency-Key are required."), 400
+        if not job_id or outcome not in _ALLOWED_OUTCOMES or not _IDEMPOTENCY_RE.fullmatch(key):
+            return jsonify(error="job_id, a supported outcome, and a valid Idempotency-Key are required."), 400
+        if isinstance(revenue_raw, bool):
+            return jsonify(error="revenue must be a non-negative number."), 400
         try:
             revenue = None if revenue_raw in (None, "") else float(revenue_raw)
         except (TypeError, ValueError):
