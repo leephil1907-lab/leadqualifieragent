@@ -8,6 +8,7 @@ from unittest.mock import patch
 from flask import Flask
 
 from web.intake_api import create_intake_blueprint
+from web.review_api import create_review_blueprint
 from web.job_queue import get_job, init_db
 from web.worker import process_job, run_once
 
@@ -19,11 +20,13 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         init_db(self.db)
         app = Flask(__name__)
         app.register_blueprint(create_intake_blueprint(db_path=self.db))
+        app.register_blueprint(create_review_blueprint(db_path=self.db))
         self.client = app.test_client()
         self.env = patch.dict(os.environ, {
             "LEAD_QUALIFIER_API_TOKEN": "test-secret-token-long-enough",
             "LEAD_QUALIFIER_TENANT_ID": "tenant-test",
-        })
+            "LEAD_QUALIFIER_RATE_LIMIT_PER_MINUTE": "60",
+        }, clear=True)
         self.env.start()
 
     def tearDown(self):
@@ -50,7 +53,7 @@ class AuthenticatedIntakeTests(unittest.TestCase):
 
     def test_intake_queues_normalized_lead_and_duplicate_is_idempotent(self):
         body = {"name": "Ada", "email": "ADA@example.com", "website": "EXAMPLE.com",
-                "consent": True}
+                "consent": True, "consent_version": "v1"}
         first = self.post(body)
         second = self.post(body)
         self.assertEqual(first.status_code, 202)
@@ -72,7 +75,32 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         job = get_job(response.json["job_id"], "tenant-test", path=self.db)
         self.assertNotIn("tenant_id", job["payload"]["lead"])
 
-    def test_worker_uses_existing_deterministic_score(self):
+    def test_multi_tenant_token_map_resolves_distinct_tenants(self):
+        os.environ["LEAD_QUALIFIER_API_TOKENS"] = json.dumps([
+            {"token": "tenant-one-secret", "tenant_id": "tenant-one"},
+            {"token": "tenant-two-secret", "tenant_id": "tenant-two"},
+        ])
+        one = self.client.post("/api/v1/intake/leads", json={"name": "One", "consent": True},
+            headers={"Authorization": "Bearer tenant-one-secret", "Idempotency-Key": "request-one"})
+        two = self.client.post("/api/v1/intake/leads", json={"name": "Two", "consent": True},
+            headers={"Authorization": "Bearer tenant-two-secret", "Idempotency-Key": "request-two"})
+        self.assertEqual(one.status_code, 202)
+        self.assertEqual(two.status_code, 202)
+        self.assertNotEqual(one.json["job_id"], two.json["job_id"])
+        self.assertIsNone(get_job(one.json["job_id"], "tenant-two", path=self.db))
+
+    def test_job_status_is_tenant_scoped_and_does_not_expose_payload(self):
+        response = self.post({"name": "Ada", "consent": True})
+        status = self.client.get("/api/v1/intake/jobs/" + response.json["job_id"],
+            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        self.assertEqual(status.status_code, 200)
+        self.assertNotIn("payload", status.json["job"])
+        os.environ["LEAD_QUALIFIER_TENANT_ID"] = "other-tenant"
+        denied = self.client.get("/api/v1/intake/jobs/" + response.json["job_id"],
+            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        self.assertEqual(denied.status_code, 404)
+
+    def test_worker_uses_existing_deterministic_score_and_requires_review(self):
         result = process_job({"job_type": "qualify_lead", "payload": {
             "lead": {"name": "Example", "company": "Example", "website": "https://example.com",
                      "email": "a@example.com", "industry": "services", "pain_point": "More leads",
@@ -81,14 +109,33 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         }})
         self.assertIn("tier", result["qualification"])
         self.assertEqual(result["qualification"]["scoring_version"], "baseline-v1")
+        self.assertTrue(result["review"]["required"])
+        self.assertFalse(result["external_actions_allowed"])
 
-    def test_worker_completes_queued_job(self):
-        body = {"name": "Ada", "email": "ada@example.com", "consent": True}
-        response = self.post(body)
+    def test_worker_completes_job_and_review_is_audited(self):
+        response = self.post({"name": "Ada", "consent": True})
         self.assertTrue(run_once(path=self.db))
         job = get_job(response.json["job_id"], "tenant-test", path=self.db)
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["result"]["qualification"]["scoring_version"], "baseline-v1")
+        reviews = self.client.get("/api/v1/reviews", headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        self.assertEqual(len(reviews.json["reviews"]), 1)
+        decision = self.client.post("/api/v1/reviews/" + response.json["job_id"],
+            json={"decision": "approved", "reviewer": "agent-owner", "reason": "Verified intake details"},
+            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        self.assertEqual(decision.status_code, 200)
+        self.assertFalse(decision.json["external_actions_triggered"])
+        second = self.client.post("/api/v1/reviews/" + response.json["job_id"],
+            json={"decision": "rejected", "reviewer": "agent-owner", "reason": "Second decision"},
+            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        self.assertEqual(second.status_code, 409)
+
+    def test_rate_limit_enforced(self):
+        os.environ["LEAD_QUALIFIER_RATE_LIMIT_PER_MINUTE"] = "1"
+        first = self.post({"name": "Ada", "consent": True}, key="request-rate-1")
+        second = self.post({"name": "Grace", "consent": True}, key="request-rate-2")
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 429)
 
 
 if __name__ == "__main__":
