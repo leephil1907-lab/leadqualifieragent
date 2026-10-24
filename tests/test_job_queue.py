@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from web.job_queue import (
-    claim_next, complete, enqueue, fail, get_job, init_db, list_events,
+    claim_next, complete, enqueue, fail, get_job, init_db, list_events, recover_stale,
 )
 
 
@@ -58,6 +58,22 @@ class DurableJobQueueTests(unittest.TestCase):
         self.assertEqual(dead["status"], "dead")
         self.assertEqual(dead["last_error"], "still failing")
         self.assertEqual(list_events(job["id"], "tenant-a", path=self.db)[-1]["event_type"], "dead_letter")
+
+    def test_expired_worker_lease_recovers_or_dead_letters_job(self):
+        retryable, _ = enqueue("tenant-a", "qualify", {}, "retry", path=self.db,
+                               max_attempts=3, now=1)
+        claim_next(path=self.db, now=1)
+        counts = recover_stale(path=self.db, now=20, lease_seconds=10)
+        self.assertEqual(counts, {"requeued": 1, "dead": 0})
+        self.assertEqual(get_job(retryable["id"], "tenant-a", path=self.db)["status"], "queued")
+
+        exhausted, _ = enqueue("tenant-a", "qualify", {}, "exhausted", path=self.db,
+                               max_attempts=1, now=21)
+        claimed = claim_next(path=self.db, now=21)
+        self.assertEqual(claimed["id"], exhausted["id"])
+        counts = recover_stale(path=self.db, now=40, lease_seconds=10)
+        self.assertEqual(counts, {"requeued": 0, "dead": 1})
+        self.assertEqual(get_job(exhausted["id"], "tenant-a", path=self.db)["status"], "dead")
 
     def test_wrong_tenant_cannot_read_or_complete_job(self):
         job, _ = enqueue("tenant-a", "qualify", {}, "key", path=self.db, now=1)
