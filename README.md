@@ -87,3 +87,12 @@ For one tenant, configure `LEAD_QUALIFIER_API_TOKEN` and `LEAD_QUALIFIER_TENANT_
 Configure signed webhook secrets with `LEAD_QUALIFIER_WEBHOOK_SECRETS`, a JSON array of `{"channel":"whatsapp","secret":"...","tenant_id":"..."}` entries. Store all secrets in deployment secret settings, not in Git.
 
 Run the worker with `python -m web.worker` on the same host and persistent SQLite file. Every processed qualification result is marked for human review, and external actions remain disabled by default. SQLite is not suitable for multi-instance production use; migrate to a shared transactional queue/database before horizontal scaling.
+
+
+## Evidence and action safety
+
+- `web.evidence.validate_extractions` validates proposed extracted fields against exact source-text evidence, confidence thresholds, and conflicts. It is a validator for an extractor's output, not an LLM itself.
+- `web.policy.evaluate_action_policy` fails closed unless explicit consent, a recorded human approval, an allowlisted action, and a valid idempotency key are present. It only evaluates policy; it never performs the action.
+- `web.evaluation.evaluate_labeled_cases` measures the unchanged baseline scorer against supplied human-labeled examples. No production accuracy claim is made without a representative labeled dataset.
+
+These components establish safety contracts. A real model provider, public website auditor, provider-specific enrichment, booking, and outbound messaging must be separately implemented, configured, and tested before they can be described as live integrations.
