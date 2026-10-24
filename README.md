@@ -96,3 +96,8 @@ Run the worker with `python -m web.worker` on the same host and persistent SQLit
 - `web.evaluation.evaluate_labeled_cases` measures the unchanged baseline scorer against supplied human-labeled examples. No production accuracy claim is made without a representative labeled dataset.
 
 These components establish safety contracts. A real model provider, public website auditor, provider-specific enrichment, booking, and outbound messaging must be separately implemented, configured, and tested before they can be described as live integrations.
+
+
+## Optional evidence-grounded LLM extraction
+
+Set `OPENAI_API_KEY` and optionally `LEAD_QUALIFIER_EXTRACTION_MODEL` to enable `web.llm_extractor.extract_lead_facts(text)`. It calls the OpenAI API only when invoked and configured, requests structured output, then independently validates that each cited evidence string appears verbatim in the source and meets the confidence threshold. Unsupported claims are rejected and conflicts trigger human review. This adapter never computes or changes qualification scores. It is not automatically invoked by the worker; host-app orchestration must decide when to call it and must account for API cost, privacy, and retention.
