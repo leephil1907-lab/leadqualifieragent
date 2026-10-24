@@ -187,10 +187,16 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
                        "meetingUrl": data.get("meetingUrl") or data.get("location")}
             status = "succeeded"
             http_status = 201
-        except requests.Timeout:
-            status, summary, uid, http_status = "uncertain", {"message": "Timeout; provider outcome is unknown."}, None, 502
+        except requests.HTTPError as exc:
+            provider_status = getattr(getattr(exc, "response", None), "status_code", 0)
+            if provider_status >= 500 or provider_status == 0:
+                status, summary, uid, http_status = "uncertain", {"message": "Provider error; booking outcome may be unknown."}, None, 502
+            else:
+                status, summary, uid, http_status = "failed", {"error_type": "ProviderRejectedRequest", "status_code": provider_status}, None, 502
         except (requests.RequestException, ValueError, RuntimeError) as exc:
-            status, summary, uid, http_status = "failed", {"error_type": type(exc).__name__}, None, 502
+            # Connection loss, malformed success payload, or missing UID may happen after
+            # the provider created the booking. Never retry these automatically.
+            status, summary, uid, http_status = "uncertain", {"message": "Provider outcome is unknown; reconcile before retrying."}, None, 502
         with connection(db_path) as conn:
             conn.execute("UPDATE qualifier_booking_attempts SET status=?,booking_uid=?,response_summary=?,updated_at=? WHERE tenant_id=? AND idempotency_key=?",
                 (status, uid, json.dumps(summary, ensure_ascii=False), time.time(), tenant_id, key))
