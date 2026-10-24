@@ -169,7 +169,13 @@ def enqueue(tenant_id: str, job_type: str, payload: dict[str, Any],
                 if row is None:
                     raise RuntimeError("Idempotency mapping points to a missing job")
                 conn.commit()
-                return _as_dict(row), False
+                result = _as_dict(row)
+                if job_type == "qualify_lead" and row["payload"] != serialized:
+                    old_identities = dict(_lead_identity_values(job_type, result["payload"]))
+                    match = next((kind for kind, digest in identities if old_identities.get(kind) == digest), None)
+                    if match:
+                        result["_duplicate_identity"] = match
+                return result, False
 
             # Compatibility with queue rows created before the request-key index existed.
             row = conn.execute("SELECT * FROM qualifier_jobs WHERE tenant_id=? AND idempotency_key=?",
