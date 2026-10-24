@@ -108,3 +108,8 @@ Set `OPENAI_API_KEY` and optionally `LEAD_QUALIFIER_EXTRACTION_MODEL` to enable 
 The repository now includes a WSGI application factory in `web.standalone:create_app()`, with `/healthz` and `/readyz` probes. The included `Procfile` defines both `web` and `worker` process commands. Configure `LEAD_QUALIFIER_DB` to a persistent database file shared by the web and worker processes when running on one host.
 
 Before deploying separate web and worker instances or scaling horizontally, migrate the queue to PostgreSQL or a managed queue. Separate ephemeral service filesystems cannot share the SQLite database. Production deployment has not been performed by this change.
+
+
+## Telegram worker alerts
+
+When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_CHAT_ID` are configured, the worker enqueues an idempotent `telegram_notification` job after completing a lead qualification. Notifications are processed by the same durable queue and use the queue's retry/dead-letter behavior. Alerts contain the business name, score, tier, pending-review status, and job ID; they omit the lead's email and phone. Delivery is at-least-once across ambiguous network failures, so duplicate admin alerts are possible if Telegram accepts a message but the response is lost.
