@@ -123,3 +123,8 @@ The standalone app also registers `GET /api/v1/analytics/summary` for tenant-sco
 ## Cal.com scheduling (optional)
 
 The standalone app registers `GET /api/v1/calendar/availability` and `POST /api/v1/calendar/bookings`. Configure `CAL_COM_API_KEY`, `CAL_COM_EVENT_TYPE_ID`, and optionally `CAL_COM_API_VERSION`. Only tokens with an explicit `booking` scope in `LEAD_QUALIFIER_API_TOKENS` can call these routes. Booking requires a completed job, the original lead-processing consent, a separate explicit `booking_consent: true` decision with `booking_consent_version` and `booking_consent_source`, and an approved human-review decision. The booking consent is timestamped and stored separately for audit. The API records an idempotent booking attempt before calling Cal.com; duplicate requests do not create another booking. If the provider times out, the result is marked `uncertain` and automatic retry is blocked because the provider may have created the booking. Reconcile uncertain attempts in Cal.com before taking further action. A live booking test still requires real Cal.com credentials and an event type; CI uses mocked HTTP responses.
+
+
+## Configuration template
+
+Start from `.env.example` for the supported environment variables. Replace every `CHANGE_ME` value with a high-entropy secret and configure secrets through the deployment platform's secret manager in production. Never commit a populated `.env` file.
