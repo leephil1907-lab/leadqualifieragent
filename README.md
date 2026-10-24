@@ -113,3 +113,8 @@ Before deploying separate web and worker instances or scaling horizontally, migr
 ## Telegram worker alerts
 
 When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_CHAT_ID` are configured, the worker enqueues an idempotent `telegram_notification` job after completing a lead qualification. Notifications are processed by the same durable queue and use the queue's retry/dead-letter behavior. Alerts contain the business name, score, tier, pending-review status, and job ID; they omit the lead's email and phone. Delivery is at-least-once across ambiguous network failures, so duplicate admin alerts are possible if Telegram accepts a message but the response is lost.
+
+
+## Pipeline analytics and outcomes
+
+The standalone app also registers `GET /api/v1/analytics/summary` for tenant-scoped job states, tier counts, review states, average qualification score, and recorded outcomes. Record a conversion or loss through `POST /api/v1/outcomes` with a completed `job_id`, an outcome (`meeting_booked`, `converted`, `lost`, `not_interested`, or `unqualified`), an `Idempotency-Key`, and optional revenue/reason. Outcome recording is transactionally idempotent and scoped to the authenticated tenant. This creates a feedback dataset; it does not automatically retrain or alter scoring.
