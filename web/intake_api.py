@@ -86,7 +86,9 @@ def create_intake_blueprint(*, db_path: str | None = None) -> Blueprint:
             job, created = enqueue(tenant, "qualify_lead", payload, key, path=db_path)
         except (IdempotencyConflict, LeadIdentityConflict) as exc:
             return jsonify(error=str(exc)), 409
-        except (ValueError, TypeError):
+        except ValueError as exc:
+            return jsonify(error=str(exc) if isinstance(exc, (IdempotencyConflict, LeadIdentityConflict)) else "Invalid intake request."), (409 if isinstance(exc, (IdempotencyConflict, LeadIdentityConflict)) else 400)
+        except TypeError:
             return jsonify(error="Invalid intake request."), 400
         if not created:
             identity_duplicate = job.pop("_duplicate_identity", None)
