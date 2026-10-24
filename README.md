@@ -118,3 +118,8 @@ When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ADMIN_CHAT_ID` are configured, the worke
 ## Pipeline analytics and outcomes
 
 The standalone app also registers `GET /api/v1/analytics/summary` for tenant-scoped job states, tier counts, review states, average qualification score, and recorded outcomes. Record a conversion or loss through `POST /api/v1/outcomes` with a completed `job_id`, an outcome (`meeting_booked`, `converted`, `lost`, `not_interested`, or `unqualified`), an `Idempotency-Key`, and optional revenue/reason. Outcome recording is transactionally idempotent and scoped to the authenticated tenant. This creates a feedback dataset; it does not automatically retrain or alter scoring.
+
+
+## Cal.com scheduling (optional)
+
+The standalone app registers `GET /api/v1/calendar/availability` and `POST /api/v1/calendar/bookings`. Configure `CAL_COM_API_KEY`, `CAL_COM_EVENT_TYPE_ID`, and optionally `CAL_COM_API_VERSION`. Only tokens with an explicit `booking` scope in `LEAD_QUALIFIER_API_TOKENS` can call these routes. Booking requires a completed job with explicit stored consent and an approved human-review decision. The API records an idempotent booking attempt before calling Cal.com; duplicate requests do not create another booking. If the provider times out, the result is marked `uncertain` and automatic retry is blocked because the provider may have created the booking. Reconcile uncertain attempts in Cal.com before taking further action. A live booking test still requires real Cal.com credentials and an event type; CI uses mocked HTTP responses.
