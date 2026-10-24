@@ -14,6 +14,7 @@ from typing import Any
 
 from web.job_queue import claim_next, complete, fail, init_db, recover_stale
 from web.lead_qualifier import _score
+from web.website_audit import audit_html_snapshot
 
 LOG = logging.getLogger("lead_qualifier.worker")
 _STOP = False
@@ -21,10 +22,22 @@ _STOP = False
 
 def process_job(job: dict[str, Any]) -> dict[str, Any]:
     """Process a qualification job without external side effects."""
+    payload = job.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Job payload must be an object")
+    if job.get("job_type") == "audit_html_snapshot":
+        html = payload.get("html")
+        if not isinstance(html, str):
+            raise ValueError("Audit job payload must contain an HTML snapshot")
+        return {
+            "audit": audit_html_snapshot(html),
+            "review": {"required": True, "status": "pending",
+                       "reason": "Review audit findings before making recommendations or changes."},
+            "external_actions_allowed": False,
+        }
     if job.get("job_type") != "qualify_lead":
         raise ValueError("Unsupported job type")
-    payload = job.get("payload")
-    lead = payload.get("lead") if isinstance(payload, dict) else None
+    lead = payload.get("lead")
     if not isinstance(lead, dict):
         raise ValueError("Job payload must contain a lead object")
     qualification = _score(lead)
