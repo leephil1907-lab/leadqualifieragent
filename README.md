@@ -101,3 +101,10 @@ These components establish safety contracts. A real model provider, public websi
 ## Optional evidence-grounded LLM extraction
 
 Set `OPENAI_API_KEY` and optionally `LEAD_QUALIFIER_EXTRACTION_MODEL` to enable `web.llm_extractor.extract_lead_facts(text)`. It calls the OpenAI API only when invoked and configured, requests structured output, then independently validates that each cited evidence string appears verbatim in the source and meets the confidence threshold. Unsupported claims are rejected and conflicts trigger human review. This adapter never computes or changes qualification scores. It is not automatically invoked by the worker; host-app orchestration must decide when to call it and must account for API cost, privacy, and retention.
+
+
+## Standalone service
+
+The repository now includes a WSGI application factory in `web.standalone:create_app()`, with `/healthz` and `/readyz` probes. The included `Procfile` defines both `web` and `worker` process commands. Configure `LEAD_QUALIFIER_DB` to a persistent database file shared by the web and worker processes when running on one host.
+
+Before deploying separate web and worker instances or scaling horizontally, migrate the queue to PostgreSQL or a managed queue. Separate ephemeral service filesystems cannot share the SQLite database. Production deployment has not been performed by this change.
