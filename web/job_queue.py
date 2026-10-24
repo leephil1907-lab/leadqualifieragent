@@ -146,7 +146,7 @@ def _as_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 def claim_next(*, path: str | None = None, now: float | None = None) -> dict[str, Any] | None:
     """Atomically claim the oldest ready job; concurrent workers cannot claim it twice."""
     stamp = time.time() if now is None else float(now)
-    with connect(path) as conn:
+    with connection(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """SELECT * FROM qualifier_jobs
@@ -174,7 +174,7 @@ def claim_next(*, path: str | None = None, now: float | None = None) -> dict[str
 def complete(job_id: str, tenant_id: str, result: dict[str, Any] | None = None,
              *, path: str | None = None, now: float | None = None) -> bool:
     stamp = time.time() if now is None else float(now)
-    with connect(path) as conn:
+    with connection(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT status FROM qualifier_jobs WHERE id=? AND tenant_id=?",
@@ -198,7 +198,7 @@ def fail(job_id: str, tenant_id: str, error: str, *, path: str | None = None,
     """Retry with capped exponential backoff; exhausted jobs become dead letters."""
     stamp = time.time() if now is None else float(now)
     safe_error = str(error or "Unknown job error")[:1000]
-    with connect(path) as conn:
+    with connection(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM qualifier_jobs WHERE id=? AND tenant_id=? AND status='processing'",
@@ -224,7 +224,7 @@ def fail(job_id: str, tenant_id: str, error: str, *, path: str | None = None,
 
 
 def get_job(job_id: str, tenant_id: str, *, path: str | None = None) -> dict[str, Any] | None:
-    with connect(path) as conn:
+    with connection(path) as conn:
         row = conn.execute(
             "SELECT * FROM qualifier_jobs WHERE id=? AND tenant_id=?", (job_id, tenant_id)
         ).fetchone()
@@ -232,7 +232,7 @@ def get_job(job_id: str, tenant_id: str, *, path: str | None = None) -> dict[str
 
 
 def list_events(job_id: str, tenant_id: str, *, path: str | None = None) -> list[dict[str, Any]]:
-    with connect(path) as conn:
+    with connection(path) as conn:
         rows = conn.execute(
             """SELECT event_type,detail,created_at FROM qualifier_job_events
                WHERE job_id=? AND tenant_id=? ORDER BY created_at,id""",
