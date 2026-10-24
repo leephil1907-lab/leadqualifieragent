@@ -1,5 +1,7 @@
 # Reachmark Lead Qualifier Agent
 
+The standalone app now includes a public marketing landing page at `/` with a client-side illustrative lead-triage demo. Set `SALES_EMAIL` to an inbox you control before publishing; the demo does not submit or store visitor inputs. The page markets a scoped managed pilot and does not claim unverified provider integrations are live.
+
 A reusable lead-qualification foundation extracted from Reachmark Digital. It provides transparent, deterministic fit and intent scoring, lead tiers, next-question selection, SQLite-backed qualification history, conversation history, and optional Telegram notifications.
 
 ## Current scope
