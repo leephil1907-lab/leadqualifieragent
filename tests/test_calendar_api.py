@@ -68,6 +68,21 @@ class CalendarAPITests(unittest.TestCase):
         self.assertTrue(again.json["duplicate"])
         self.assertEqual(post.call_count, 1)
 
+
+    @patch("web.calendar_api.requests.post")
+    def test_booking_timeout_is_marked_uncertain_and_not_retried(self, post):
+        job_id = self._approved_job()
+        import requests
+        post.side_effect = requests.Timeout("response timed out")
+        headers = {"Authorization": "Bearer booking-token", "Idempotency-Key": "booking-timeout-001"}
+        body = {"job_id": job_id, "start": "2027-01-01T10:00:00Z", "timeZone": "Africa/Lagos"}
+        first = self.client.post("/api/v1/calendar/bookings", json=body, headers=headers)
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(first.json["status"], "uncertain")
+        second = self.client.post("/api/v1/calendar/bookings", json=body, headers=headers)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(post.call_count, 1)
+
     def test_intake_token_cannot_book_and_pending_review_blocks_booking(self):
         r = self.client.post("/api/v1/intake/leads", json={"name": "Ada", "consent": True},
             headers={"Authorization": "Bearer intake-token", "Idempotency-Key": "calendar-lead-002"})
