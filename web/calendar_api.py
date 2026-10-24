@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -56,6 +57,10 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
                 idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL,
                 booking_uid TEXT, response_summary TEXT, created_at REAL NOT NULL,
                 updated_at REAL NOT NULL, UNIQUE(tenant_id,idempotency_key))""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS qualifier_booking_consents (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, job_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL, purpose TEXT NOT NULL, wording_version TEXT NOT NULL,
+                source TEXT NOT NULL, recorded_at REAL NOT NULL, UNIQUE(tenant_id,idempotency_key))""")
 
     @blueprint.get("/api/v1/calendar/availability")
     def availability():
@@ -107,7 +112,19 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
             return jsonify(error="Completed qualification job not found."), 404
         payload = job.get("payload", {})
         result = job.get("result", {})
-        policy = evaluate_action_policy(action="book_call", consent=payload.get("consent"),
+        if body.get("booking_consent") is not True:
+            return jsonify(error="Explicit booking consent is required."), 400
+        consent_version = str(body.get("booking_consent_version", "")).strip()[:80]
+        consent_source = str(body.get("booking_consent_source", "")).strip()[:100]
+        if not consent_version or not consent_source:
+            return jsonify(error="Booking consent version and source are required."), 400
+        stored_consent = payload.get("consent")
+        combined_consent = {
+            "granted": isinstance(stored_consent, dict) and stored_consent.get("granted") is True,
+            "purpose": "booking",
+            "booking_consent_granted": True,
+        }
+        policy = evaluate_action_policy(action="book_call", consent=combined_consent,
             review=result.get("review"), idempotency_key=key, allowed_actions={"book_call"})
         if not policy["allowed"]:
             return jsonify(error="Booking is blocked by the consent/review policy.", policy=policy), 403
@@ -128,9 +145,10 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
             "attendee": {"name": name, "email": email, "timeZone": timezone_name, "language": "en"},
             "metadata": {"source": "lead-qualifier-agent", "jobId": job_id, "idempotencyKey": key},
         }
-        fingerprint = hashlib.sha256(json.dumps(booking_payload, sort_keys=True).encode()).hexdigest()
+        fingerprint_payload = {"booking": booking_payload, "consent_version": consent_version,
+                              "consent_source": consent_source}
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode()).hexdigest()
         init_attempts()
-        import time
         stamp = time.time()
         with connection(db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -149,6 +167,10 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
                 (id,tenant_id,job_id,idempotency_key,request_hash,status,created_at,updated_at)
                 VALUES(?,?,?,?,?,'processing',?,?)""",
                 (uuid.uuid4().hex, tenant_id, job_id, key, fingerprint, stamp, stamp))
+            conn.execute("""INSERT INTO qualifier_booking_consents
+                (id,tenant_id,job_id,idempotency_key,purpose,wording_version,source,recorded_at)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                (uuid.uuid4().hex, tenant_id, job_id, key, "booking", consent_version, consent_source, stamp))
             conn.commit()
         try:
             response = requests.post("https://api.cal.com/v2/bookings", json=booking_payload,
