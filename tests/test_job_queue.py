@@ -30,6 +30,24 @@ class DurableJobQueueTests(unittest.TestCase):
         self.assertTrue(other_created)
         self.assertNotEqual(first["id"], other_tenant["id"])
 
+
+    def test_lead_identity_deduplication_is_tenant_scoped(self):
+        first, created = enqueue("tenant-a", "qualify_lead",
+            {"lead": {"email": "owner@example.com", "website": "https://example.com"}},
+            "lead-key-0001", path=self.db, now=100)
+        duplicate, duplicate_created = enqueue("tenant-a", "qualify_lead",
+            {"lead": {"email": "OWNER@example.com", "website": "https://other.example"}},
+            "lead-key-0002", path=self.db, now=101)
+        other_tenant, other_created = enqueue("tenant-b", "qualify_lead",
+            {"lead": {"email": "owner@example.com", "website": "https://example.com"}},
+            "lead-key-0003", path=self.db, now=102)
+        self.assertTrue(created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate["id"], first["id"])
+        self.assertEqual(duplicate["_duplicate_identity"], "email")
+        self.assertTrue(other_created)
+        self.assertNotEqual(other_tenant["id"], first["id"])
+
     def test_claim_and_complete_records_audit_events(self):
         job, _ = enqueue("tenant-a", "qualify", {"x": 1}, "key", path=self.db, now=10)
         claimed = claim_next(path=self.db, now=10)
