@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import hashlib
+from urllib.parse import urlsplit
 from contextlib import contextmanager
 import time
 import uuid
@@ -74,6 +76,19 @@ def init_db(path: str | None = None) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_qualifier_job_events_job
             ON qualifier_job_events(tenant_id, job_id, created_at);
+        CREATE TABLE IF NOT EXISTS qualifier_request_keys (
+            tenant_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+            job_id TEXT NOT NULL REFERENCES qualifier_jobs(id),
+            payload_hash TEXT NOT NULL, created_at REAL NOT NULL,
+            PRIMARY KEY(tenant_id,idempotency_key)
+        );
+        CREATE TABLE IF NOT EXISTS qualifier_lead_identities (
+            tenant_id TEXT NOT NULL, identity_type TEXT NOT NULL, identity_hash TEXT NOT NULL,
+            job_id TEXT NOT NULL REFERENCES qualifier_jobs(id), created_at REAL NOT NULL,
+            PRIMARY KEY(tenant_id,identity_type,identity_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_qualifier_lead_identity_job
+            ON qualifier_lead_identities(tenant_id,job_id);
         """)
 
 
@@ -86,10 +101,40 @@ def _event(conn: sqlite3.Connection, job_id: str, tenant_id: str,
     )
 
 
+class IdempotencyConflict(ValueError):
+    """An idempotency key was reused with a different payload."""
+
+
+class LeadIdentityConflict(ValueError):
+    """Lead identity fields point at more than one existing lead job."""
+
+
+def _lead_identity_values(job_type: str, payload: dict[str, Any]) -> list[tuple[str, str]]:
+    if job_type != "qualify_lead":
+        return []
+    lead = payload.get("lead")
+    if not isinstance(lead, dict):
+        return []
+    raw: list[tuple[str, str]] = []
+    email = str(lead.get("email") or "").strip().lower()
+    website = str(lead.get("website") or "").strip()
+    if email:
+        raw.append(("email", email))
+    if website:
+        try:
+            host = urlsplit(website if "://" in website else "https://" + website).hostname
+        except ValueError:
+            host = None
+        if host:
+            raw.append(("website", host.lower()))
+    return [(kind, hashlib.sha256((kind + ":" + value).encode("utf-8")).hexdigest())
+            for kind, value in raw]
+
+
 def enqueue(tenant_id: str, job_type: str, payload: dict[str, Any],
             idempotency_key: str, *, path: str | None = None,
             max_attempts: int = 5, now: float | None = None) -> tuple[dict[str, Any], bool]:
-    """Create one job per tenant/idempotency key; returns (job, created)."""
+    """Create a job idempotently; qualify_lead jobs also dedupe by email/website per tenant."""
     tenant_id = str(tenant_id or "").strip()
     job_type = str(job_type or "").strip()
     key = str(idempotency_key or "").strip()
@@ -105,18 +150,80 @@ def enqueue(tenant_id: str, job_type: str, payload: dict[str, Any],
         raise ValueError("max_attempts must be between 1 and 20")
     stamp = time.time() if now is None else float(now)
     job_id = uuid.uuid4().hex
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    identities = _lead_identity_values(job_type, payload)
+
     with connection(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            mapped = conn.execute(
+                "SELECT job_id,payload_hash FROM qualifier_request_keys WHERE tenant_id=? AND idempotency_key=?",
+                (tenant_id, key),
+            ).fetchone()
+            if mapped:
+                if job_type == "qualify_lead" and mapped["payload_hash"] != payload_hash:
+                    raise IdempotencyConflict("Idempotency-Key was already used with a different payload.")
+                row = conn.execute("SELECT * FROM qualifier_jobs WHERE id=? AND tenant_id=?",
+                                   (mapped["job_id"], tenant_id)).fetchone()
+                if row is None:
+                    raise RuntimeError("Idempotency mapping points to a missing job")
+                conn.commit()
+                return _as_dict(row), False
+
+            # Compatibility with queue rows created before the request-key index existed.
+            row = conn.execute("SELECT * FROM qualifier_jobs WHERE tenant_id=? AND idempotency_key=?",
+                               (tenant_id, key)).fetchone()
+            if row:
+                if job_type == "qualify_lead" and row["payload"] != serialized:
+                    raise IdempotencyConflict("Idempotency-Key was already used with a different payload.")
+                conn.execute("INSERT OR IGNORE INTO qualifier_request_keys VALUES(?,?,?,?,?)",
+                             (tenant_id, key, row["id"], payload_hash, stamp))
+                conn.commit()
+                return _as_dict(row), False
+
+            if identities:
+                matches = []
+                for identity_type, identity_hash in identities:
+                    identity = conn.execute(
+                        "SELECT job_id FROM qualifier_lead_identities WHERE tenant_id=? AND identity_type=? AND identity_hash=?",
+                        (tenant_id, identity_type, identity_hash),
+                    ).fetchone()
+                    if identity:
+                        existing = conn.execute("SELECT * FROM qualifier_jobs WHERE id=? AND tenant_id=?",
+                                                (identity["job_id"], tenant_id)).fetchone()
+                        if existing and existing["status"] == "dead":
+                            conn.execute("DELETE FROM qualifier_lead_identities WHERE tenant_id=? AND job_id=?",
+                                         (tenant_id, existing["id"]))
+                        elif existing:
+                            matches.append((identity_type, existing))
+                distinct_ids = {row["id"] for _, row in matches}
+                if len(distinct_ids) > 1:
+                    raise LeadIdentityConflict("Email and website match different existing leads; manual review is required.")
+                if matches:
+                    identity_type, existing = matches[0]
+                    conn.execute("INSERT INTO qualifier_request_keys VALUES(?,?,?,?,?)",
+                                 (tenant_id, key, existing["id"], payload_hash, stamp))
+                    _event(conn, existing["id"], tenant_id, "duplicate_submission",
+                           {"identity_type": identity_type}, stamp)
+                    conn.commit()
+                    result = _as_dict(existing)
+                    result["_duplicate_identity"] = identity_type
+                    return result, False
+
             conn.execute(
                 """INSERT INTO qualifier_jobs
                 (id,tenant_id,job_type,idempotency_key,payload,status,attempts,max_attempts,
                  available_at,created_at,updated_at)
                 VALUES(?,?,?,?,?,'queued',0,?,?,?,?)""",
-                (job_id, tenant_id, job_type, key,
-                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                (job_id, tenant_id, job_type, key, serialized,
                  max_attempts, stamp, stamp, stamp),
             )
+            conn.execute("INSERT INTO qualifier_request_keys VALUES(?,?,?,?,?)",
+                         (tenant_id, key, job_id, payload_hash, stamp))
+            for identity_type, identity_hash in identities:
+                conn.execute("INSERT INTO qualifier_lead_identities VALUES(?,?,?,?,?)",
+                             (tenant_id, identity_type, identity_hash, job_id, stamp))
             _event(conn, job_id, tenant_id, "queued", {"job_type": job_type}, stamp)
             row = conn.execute("SELECT * FROM qualifier_jobs WHERE id=?", (job_id,)).fetchone()
             conn.commit()
