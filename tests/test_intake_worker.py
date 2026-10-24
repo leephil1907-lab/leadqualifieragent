@@ -26,6 +26,7 @@ class AuthenticatedIntakeTests(unittest.TestCase):
             "LEAD_QUALIFIER_API_TOKEN": "test-secret-token-long-enough",
             "LEAD_QUALIFIER_TENANT_ID": "tenant-test",
             "LEAD_QUALIFIER_RATE_LIMIT_PER_MINUTE": "60",
+            "LEAD_QUALIFIER_REVIEW_TOKENS": json.dumps([{"token": "review-secret-token", "tenant_id": "tenant-test", "scopes": ["review"]}]),
         }, clear=True)
         self.env.start()
 
@@ -118,16 +119,16 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         job = get_job(response.json["job_id"], "tenant-test", path=self.db)
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["result"]["qualification"]["scoring_version"], "baseline-v1")
-        reviews = self.client.get("/api/v1/reviews", headers={"Authorization": "Bearer test-secret-token-long-enough"})
+        reviews = self.client.get("/api/v1/reviews", headers={"Authorization": "Bearer review-secret-token"})
         self.assertEqual(len(reviews.json["reviews"]), 1)
         decision = self.client.post("/api/v1/reviews/" + response.json["job_id"],
             json={"decision": "approved", "reviewer": "agent-owner", "reason": "Verified intake details"},
-            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+            headers={"Authorization": "Bearer review-secret-token"})
         self.assertEqual(decision.status_code, 200)
         self.assertFalse(decision.json["external_actions_triggered"])
         second = self.client.post("/api/v1/reviews/" + response.json["job_id"],
             json={"decision": "rejected", "reviewer": "agent-owner", "reason": "Second decision"},
-            headers={"Authorization": "Bearer test-secret-token-long-enough"})
+            headers={"Authorization": "Bearer review-secret-token"})
         self.assertEqual(second.status_code, 409)
 
     def test_rate_limit_enforced(self):
