@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -15,6 +16,9 @@ from flask import Blueprint, jsonify, request
 from web.job_queue import connection, get_job
 from web.policy import evaluate_action_policy
 from web.service_auth import resolve_bearer_tenant
+
+
+_IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 
 
 def _config():
@@ -96,7 +100,7 @@ def create_calendar_blueprint(*, db_path: str | None = None) -> Blueprint:
             return jsonify(error="Request body must be a JSON object."), 400
         job_id = str(body.get("job_id", "")).strip()
         key = request.headers.get("Idempotency-Key", "").strip()
-        if not job_id or not 8 <= len(key) <= 200:
+        if not job_id or not _IDEMPOTENCY_RE.fullmatch(key):
             return jsonify(error="job_id and Idempotency-Key are required."), 400
         job = get_job(job_id, tenant_id, path=db_path)
         if not job or job.get("status") != "succeeded":
