@@ -3,6 +3,10 @@
 A reusable lead-qualification foundation extracted from Reachmark Digital. It provides transparent, deterministic fit and intent scoring, lead tiers, next-question selection, SQLite-backed qualification history, conversation history, and optional Telegram notifications.
 
 ## Current scope
+
+- Side-effect-free intake normalization with field limits, email checks, and safe HTTP/HTTPS URL normalization.
+- Durable SQLite job-queue primitive with tenant-scoped idempotency, atomic claims, exponential retries, dead-letter state, and an append-only event trail.
+- Tests for queue lifecycle, retry exhaustion, duplicate submissions, and tenant isolation.
 - Deterministic fit score, intent score, weighted total, and A/B/C/D tiers.
 - Reasons and missing-field evidence for each score.
 - A single next qualification question.
@@ -26,6 +30,14 @@ Create a virtual environment, run pip install -r requirements.txt, then run pyth
 
 ## Environment
 Telegram alerts are optional and require TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_CHAT_ID. Do not commit secrets to this repository.
+
+## Phase 1 reliability work
+
+The `web.job_queue` module is a storage primitive for a separate worker to use. It supports `queued`, `processing`, `succeeded`, and `dead` states; atomic claiming; bounded retries; tenant-scoped idempotency; and audit events. It does not start a worker process or automatically execute jobs. The current implementation is SQLite-backed for development and modest single-host workloads.
+
+The `web.intake_validation` module bounds recognized fields, discards unknown keys, normalizes email and website values, and rejects malformed input before persistence. It does not fetch websites or guarantee protection against SSRF in any future URL-fetching component.
+
+CI runs unit tests, Python compilation, and a dependency vulnerability audit. A clean dependency audit only covers known published package vulnerabilities and does not replace application security review.
 
 ## Important limitations before production
 This is a foundation, not yet the full Version 3 specification. Public anonymous capture, rate limiting, consent/policy enforcement, a durable background queue and dead-letter handling, AI fact extraction with evidence/confidence validation, website auditing, provider-based enrichment, Cal.com booking, human-review actions, and multi-channel ingestion remain future work. The current message endpoint uses simple deterministic inference; it is not an AI extractor. The current score is a baseline and should be evaluated against a labeled dataset before production decisions depend on it.
