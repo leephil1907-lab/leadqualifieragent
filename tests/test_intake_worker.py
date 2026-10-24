@@ -135,6 +135,20 @@ class AuthenticatedIntakeTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
 
 
+
+    def test_authorized_html_audit_is_queued_and_processed_without_network(self):
+        html = "<html><head><title>Small</title></head><body><h2>Services</h2></body></html>"
+        response = self.client.post("/api/v1/audits/html-snapshot",
+            json={"html": html, "authorized_to_audit": True},
+            headers={"Authorization": "Bearer test-secret-token-long-enough",
+                     "Idempotency-Key": "audit-request-001"})
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(run_once(path=self.db))
+        job = get_job(response.json["job_id"], "tenant-test", path=self.db)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertFalse(job["result"]["audit"]["network_checks_performed"])
+        self.assertIn("missing_viewport", {x["code"] for x in job["result"]["audit"]["findings"]})
+
     def test_signed_whatsapp_webhook_requires_fresh_valid_signature_and_consent(self):
         secret = "webhook-secret-for-tests"
         os.environ["LEAD_QUALIFIER_WEBHOOK_SECRETS"] = json.dumps([
