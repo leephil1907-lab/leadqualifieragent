@@ -14,6 +14,14 @@ class StandaloneAppTests(unittest.TestCase):
             self.assertEqual(client.get("/healthz").status_code, 200)
             self.assertEqual(client.get("/readyz").status_code, 200)
 
+    def test_public_landing_page_and_demo_render(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LEAD_QUALIFIER_DB": os.path.join(tmp, "queue.sqlite3")}):
+            response = create_app().test_client().get("/")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"More enquiries deserve a", response.data)
+            self.assertIn(b"Interactive sample", response.data)
+            self.assertIn(b"Illustrative records only", response.data)
+
 
 if __name__ == "__main__":
     unittest.main()
