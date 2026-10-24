@@ -8,6 +8,7 @@
 - Signed channel webhook adapter using HMAC-SHA256 over `timestamp + "." + raw body`, five-minute replay window, and an allowlist of channel names.
 - Durable queue with atomic claims, retries, lease recovery, dead-letter handling, tenant-scoped events, and connection lifecycle management.
 - Review decisions require a reason, are one-time and tenant-scoped, and do not execute external actions.
+- Cal.com availability/booking routes require a separate `booking` token scope; booking also requires a separate explicit booking-consent flag, wording version/source, and an approved review decision. Booking attempts and consent are recorded before the provider call; ambiguous timeouts are not automatically retried.
 - Worker uses the existing deterministic `baseline-v1` scorer; external actions are disabled by default.
 - CI runs unit tests, Python compilation, and `pip-audit`.
 
@@ -19,7 +20,8 @@
 - Validate and retain consent wording, purpose, timestamp, source, and policy version to meet applicable privacy obligations; supplied timestamps are not independently verified.
 - The signed webhook format is a generic adapter contract, not a complete vendor integration. Verify each vendor's signature format, delivery retry behavior, event ID, and consent semantics before connecting it.
 - Do not enable website fetching until a dedicated outbound-fetch layer enforces public-IP allowlists, blocks loopback/private/link-local/multicast/reserved/cloud-metadata addresses, revalidates DNS across redirects, pins connections safely, caps redirects/bytes/timeouts, and has SSRF regression tests.
-- Provider enrichment, email/WhatsApp/phone outreach, calendar booking, and Telegram delivery must be separately authorized, consent-aware, idempotent, and logged. Human approval must gate consequential external actions.
+- Provider enrichment and email/WhatsApp/phone outreach are not yet implemented as outbound adapters. Any future outreach must be separately authorized, consent-aware, idempotent, and logged. Human approval must gate consequential external actions.
+- Cal.com booking is implemented as an optional provider adapter, but live API behavior must be tested with a real account/event type before production use. Reconcile any `uncertain` booking attempt in Cal.com before taking further action.
 - Use PostgreSQL or a managed queue for multiple application/worker instances. SQLite is intended only for a single host and modest workloads.
 - The host app must use secure cookies, CSRF protections for session routes, authentication, and tenant-scoped database queries.
 
