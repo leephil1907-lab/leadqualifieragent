@@ -223,6 +223,40 @@ def fail(job_id: str, tenant_id: str, error: str, *, path: str | None = None,
         return _as_dict(result)
 
 
+def recover_stale(*, path: str | None = None, now: float | None = None,
+                 lease_seconds: float = 300.0) -> dict[str, int]:
+    """Recover jobs whose worker lease expired, recording every recovery.
+
+    Jobs that have exhausted attempts become dead; others return to the queue.
+    A worker should use a lease longer than its expected processing duration.
+    """
+    stamp = time.time() if now is None else float(now)
+    lease = max(1.0, float(lease_seconds))
+    cutoff = stamp - lease
+    counts = {"requeued": 0, "dead": 0}
+    with connection(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            """SELECT * FROM qualifier_jobs
+               WHERE status='processing' AND locked_at IS NOT NULL AND locked_at<=?
+               ORDER BY locked_at,id""", (cutoff,)
+        ).fetchall()
+        for row in rows:
+            exhausted = row["attempts"] >= row["max_attempts"]
+            status = "dead" if exhausted else "queued"
+            conn.execute(
+                """UPDATE qualifier_jobs SET status=?,available_at=?,locked_at=NULL,
+                   last_error=?,updated_at=? WHERE id=? AND status='processing'""",
+                (status, stamp, "Worker lease expired", stamp, row["id"]),
+            )
+            event_type = "dead_letter" if exhausted else "lease_expired"
+            _event(conn, row["id"], row["tenant_id"], event_type,
+                   {"attempt": row["attempts"], "lease_seconds": lease}, stamp)
+            counts["dead" if exhausted else "requeued"] += 1
+        conn.commit()
+    return counts
+
+
 def get_job(job_id: str, tenant_id: str, *, path: str | None = None) -> dict[str, Any] | None:
     with connection(path) as conn:
         row = conn.execute(
