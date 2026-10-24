@@ -1,8 +1,8 @@
 """Runnable worker for durable lead-qualification jobs.
 
 Run with: python -m web.worker
-SQLite is suitable for one host/modest throughput; use PostgreSQL-backed
-queue semantics before running multiple application instances.
+SQLite is intended for one host and modest throughput; migrate to PostgreSQL or a
+managed queue before deploying multiple worker/application instances.
 """
 from __future__ import annotations
 
@@ -20,15 +20,25 @@ _STOP = False
 
 
 def process_job(job: dict[str, Any]) -> dict[str, Any]:
-    """Process supported jobs without performing external side effects."""
+    """Process a qualification job without external side effects."""
     if job.get("job_type") != "qualify_lead":
         raise ValueError("Unsupported job type")
     payload = job.get("payload")
     lead = payload.get("lead") if isinstance(payload, dict) else None
     if not isinstance(lead, dict):
         raise ValueError("Job payload must contain a lead object")
-    # Preserve the existing deterministic scoring model; do not send data to an LLM.
-    return {"qualification": _score(lead), "lead": lead}
+    qualification = _score(lead)
+    # This is a workflow guard, not a change to the scoring result.
+    return {
+        "qualification": qualification,
+        "lead": lead,
+        "review": {
+            "required": True,
+            "status": "pending",
+            "reason": "Human review is required before external actions.",
+        },
+        "external_actions_allowed": False,
+    }
 
 
 def run_once(*, path: str | None = None) -> bool:
