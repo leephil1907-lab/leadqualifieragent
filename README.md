@@ -39,10 +39,10 @@ The `web.intake_validation` module bounds recognized fields, discards unknown ke
 
 CI runs unit tests, Python compilation, and a dependency vulnerability audit. A clean dependency audit only covers known published package vulnerabilities and does not replace application security review.
 
-## Important limitations before production
-This is a foundation, not yet the full Version 3 specification. Public anonymous capture, rate limiting, consent/policy enforcement, a durable background queue and dead-letter handling, AI fact extraction with evidence/confidence validation, website auditing, provider-based enrichment, Cal.com booking, human-review actions, and multi-channel ingestion remain future work. The current message endpoint uses simple deterministic inference; it is not an AI extractor. The current score is a baseline and should be evaluated against a labeled dataset before production decisions depend on it.
+## Remaining integration gates
+This repository remains a Flask integration module rather than a standalone SaaS application. The authenticated queue, worker, tenant-scoped review queue, and signed channel webhook adapter are implemented on the feature branch. Live provider enrichment, website crawling/auditing, an LLM extractor, Cal.com booking, production dashboard UI, Telegram delivery from the worker, and provider-specific email/WhatsApp/phone adapters are not represented as complete: they require approved provider choices, credentials, host-app wiring, and additional validation. No provider calls are fabricated.
 
-Do not deploy this module as a public standalone service without implementing authentication, tenant isolation, CSRF/webhook protections as appropriate, rate limiting, and an operational job queue.
+The deterministic `baseline-v1` scoring engine is unchanged. Evaluate it against a representative, labeled dataset before using it for consequential routing. Do not expose the service publicly until the deployment checklist in SECURITY.md is satisfied.
 
 ## Qualification principles
 AI may extract and explain supported facts, but a deterministic rules engine owns the score. Uncertain or conflicting cases should be routed to human review. Every material decision and external action should be recorded with enough evidence to explain it later.
@@ -62,3 +62,28 @@ Configure `LEAD_QUALIFIER_API_TOKEN` and `LEAD_QUALIFIER_TENANT_ID`; without bot
 Run the worker on the same host/database with `python -m web.worker`. It processes `qualify_lead` jobs with the existing `baseline-v1` deterministic scorer, retries failures, and writes results/audit events. It does not call Telegram, email, an LLM, enrichment services, or booking APIs. Use a process supervisor in deployment; keep the SQLite database on persistent local storage. Do not use this SQLite queue for multi-instance production workloads.
 
 Run checks with `python -m pytest tests -q`, `python -m compileall -q web tests`, and `pip-audit -r requirements.txt`.
+
+
+## Authenticated multi-tenant intake and review
+
+The intake blueprint exposes:
+- `POST /api/v1/intake/leads`: bearer-authenticated lead submission, explicit consent, normalized fields, bounded JSON body, per-token/tenant rate limiting, idempotency, and a queued job ID.
+- `GET /api/v1/intake/jobs/<job_id>`: tenant-scoped job status and lifecycle events, without returning the raw intake payload.
+- `POST /api/v1/webhooks/<channel>`: HMAC-SHA256 signed webhooks for `website_form`, `email`, `whatsapp`, `telegram`, `phone`, `crm`, and `calcom`. Sign `timestamp + "." + raw_request_body`, send `X-Webhook-Timestamp`, `X-Webhook-Signature: sha256=<hex>`, and `Idempotency-Key`. Timestamps older than five minutes are rejected. These are generic adapters for trusted gateways, not turnkey integrations with each vendor's unique webhook format.
+- `GET /api/v1/reviews` and `POST /api/v1/reviews/<job_id>`: tenant-scoped review queue and one-time approve/reject decisions with required reasons and audit events. Recording approval does not execute an external action.
+
+Register both blueprints with the host Flask app:
+
+```python
+from web.intake_api import create_intake_blueprint
+from web.review_api import create_review_blueprint
+
+app.register_blueprint(create_intake_blueprint())
+app.register_blueprint(create_review_blueprint())
+```
+
+For one tenant, configure `LEAD_QUALIFIER_API_TOKEN` and `LEAD_QUALIFIER_TENANT_ID`. For multiple tenants, configure `LEAD_QUALIFIER_API_TOKENS` as a JSON array of objects with `token`, `tenant_id`, and optional `scopes`. Keep intake tokens scoped to `intake` and `status`; review uses a separate `LEAD_QUALIFIER_REVIEW_TOKENS` JSON array with `token`, `tenant_id`, and `scopes: ["review"]`. Use long random secrets and keep them out of source control.
+
+Configure signed webhook secrets with `LEAD_QUALIFIER_WEBHOOK_SECRETS`, a JSON array of `{"channel":"whatsapp","secret":"...","tenant_id":"..."}` entries. Store all secrets in deployment secret settings, not in Git.
+
+Run the worker with `python -m web.worker` on the same host and persistent SQLite file. Every processed qualification result is marked for human review, and external actions remain disabled by default. SQLite is not suitable for multi-instance production use; migrate to a shared transactional queue/database before horizontal scaling.
